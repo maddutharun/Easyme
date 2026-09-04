@@ -1,7 +1,9 @@
 node_modules/
 .env
 uploads/
-data/
+/data/
+backend/data/*.json
+backend/data/*.db
 .DS_Store
 COMPLETE_CODE.md
 SOURCE_ONLY_CODE.md
