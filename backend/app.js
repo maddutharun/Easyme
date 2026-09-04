@@ -222,15 +222,14 @@ function metricsSnapshot() {
   };
 }
 
-app.use((req, res, next) => {
-  if (req.method === 'GET' && (req.path === '/' || /\.(html|js|css)$/.test(req.path))) {
+app.use(express.static(frontendDir, {
+  etag: false,
+  lastModified: false,
+  setHeaders(res) {
     res.set('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
     res.set('Pragma', 'no-cache');
-    res.set('Expires', '0');
   }
-  next();
-});
-app.use(express.static(frontendDir, { etag: false, lastModified: false, cacheControl: false }));
+}));
 
 app.post('/api/auth/login', async (req, res) => {
   const { email, password } = req.body || {};
