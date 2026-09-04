@@ -6,6 +6,8 @@ import { showToast } from './core/toast.js';
 import { renderDashboardPage as renderDashboardModule } from './pages/dashboard.js';
 import { renderExportsPage as renderExportsModule } from './pages/exports.js';
 import { renderWorkflowPage as renderWorkflowModule } from './pages/workflow.js';
+import { renderExceptionsPage } from './pages/exceptions.js';
+import { renderInvoiceDetailPage as renderInvoiceDetailModule } from './pages/review.js?v=sage7';
 import {
   setupThemeToggle,
   showToastNotification,
@@ -15,8 +17,7 @@ import {
   initExportPreview,
   addStatusBadgeAnimations
 } from './enhancements.js';
-import { uppyService } from './integrations/uppy-service.js';
-import { realtimeService } from './integrations/realtime-service.js';
+import { apiFetch, getToken, getUser, setSession, clearSession, canPerform } from './core/api.js';
 
 const appView = document.getElementById('appView');
 
@@ -38,6 +39,7 @@ function toggleDarkMode() {
   state.darkMode = !state.darkMode;
   document.body.classList.toggle('dark-mode', state.darkMode);
   localStorage.setItem('darkMode', state.darkMode);
+  localStorage.setItem('theme', state.darkMode ? 'dark' : 'light');
 }
 
 function pushHistory() {
@@ -78,12 +80,23 @@ function toggleSidebarCollapse() {
   document.querySelector('.sidebar').classList.toggle('collapsed', state.sidebarCollapsed);
 }
 
+function navigateTo(view) {
+  if (!view) return;
+  state.currentView = view;
+  if (view === 'invoices') {
+    state.filterStatus = 'all';
+    state.searchQuery = '';
+  }
+  renderView();
+}
+
 function setupKeyboardShortcuts() {
   document.addEventListener('keydown', (e) => {
     if (e.ctrlKey || e.metaKey) return;
     if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
     
     switch(e.key.toLowerCase()) {
+      case 'x': state.currentView = 'exceptions'; renderView(); break;
       case 'u': state.currentView = 'upload'; renderView(); break;
       case 'd': state.currentView = 'dashboard'; renderView(); break;
       case 'i': state.currentView = 'invoices'; renderView(); break;
@@ -98,9 +111,30 @@ function setupKeyboardShortcuts() {
 
 async function loadInvoices() {
   try {
-    const response = await fetch('/api/summary');
-    const summary = await response.json();
+    const [summaryResponse, auditResponse, metricsResponse] = await Promise.all([
+      apiFetch('/api/summary'),
+      apiFetch('/api/audit'),
+      apiFetch('/api/metrics')
+    ]);
+    if (summaryResponse.status === 401) {
+      state.invoices = [];
+      state.audit = [];
+      state.metrics = { total: 0, posted: 0, exceptions: 0 };
+      showLogin(true);
+      showToast('Your session expired. Please sign in again.', 'info');
+      return;
+    }
+    if (!summaryResponse.ok) {
+      const failure = await summaryResponse.json().catch(() => ({}));
+      throw new Error(failure.error || `Invoice loading failed (${summaryResponse.status})`);
+    }
+    const summary = await summaryResponse.json();
+    const auditPayload = auditResponse.ok ? await auditResponse.json() : { audit: [] };
+    const metricsPayload = metricsResponse.ok ? await metricsResponse.json() : { metrics: {} };
     state.invoices = [...(summary.invoices || [])].sort((a, b) => new Date(b.date || '1970-01-01') - new Date(a.date || '1970-01-01'));
+    state.audit = auditPayload.audit || [];
+    state.metrics = metricsPayload.metrics || summary.metrics || {};
+    refreshChrome();
     if (!state.selectedInvoiceId && state.invoices.length) state.selectedInvoiceId = state.invoices[0].id;
     renderView();
   } catch (error) {
@@ -121,8 +155,8 @@ function validateSelectedFile(file) {
     return { valid: false, message: 'Unsupported file type. Please upload PDF, PNG, JPG, TIFF, XLSX, or XLS.' };
   }
 
-  if (file.size > 100 * 1024 * 1024) {
-    return { valid: false, message: 'File is too large. Please keep each invoice under 100 MB.' };
+  if (file.size > 10 * 1024 * 1024) {
+    return { valid: false, message: 'File is too large. Please keep each invoice under 10 MB.' };
   }
 
   return { valid: true };
@@ -155,9 +189,8 @@ function renderUploadPage() {
       <div class="upload-card">
         <label class="dropzone" for="uploadInput">
           <div class="dropzone-inner">
-            <div class="upload-icon">📄</div>
-            <p class="upload-copy">Drop invoices here or <strong>click to browse</strong></p>
-            <p class="upload-help">PDF, PNG, JPG, TIFF — up to 100 MB per file</p>
+            <p class="upload-copy">Drop a PDF, image, or Excel file, or <strong>browse</strong></p>
+            <p class="upload-help">PDF, PNG, JPG, TIFF, XLSX — 10 MB max for matching</p>
           </div>
         </label>
         <input id="uploadInput" class="file-input" type="file" accept=".pdf,.png,.jpg,.jpeg,.xlsx,.xls,.tiff" />
@@ -188,12 +221,10 @@ function renderUploadPage() {
 
       <div id="uploadStatus" class="upload-status" aria-live="polite"></div>
 
-      <div class="section-card animate-slideUp" style="margin-top: 28px;">
-        <h3 style="margin: 0 0 12px 0; color: var(--heading);">💡 Supported File Formats</h3>
+      <div class="section-card" style="margin-top: 28px;">
+        <h3 style="margin: 0 0 12px 0; color: var(--heading);">Accepted sources</h3>
         <p style="margin: 0; color: var(--muted); font-size: 0.9rem;">
-          <strong>PDF:</strong> Native PDFs with selectable text. 
-          <strong>Images:</strong> PNG, JPG, TIFF with automatic OCR fallback. 
-          <strong>Excel:</strong> XLSX and XLS files with structured data.
+          Text PDFs extract immediately. Images use OCR. Spreadsheets map vendor, amount, tax, and PO columns.
         </p>
       </div>
     </div>
@@ -226,7 +257,7 @@ function renderUploadPage() {
 
     if (!validation.valid) {
       statusEl.className = 'upload-status error';
-      statusEl.textContent = '❌ ' + validation.message;
+      statusEl.textContent = validation.message;
       return;
     }
 
@@ -234,11 +265,12 @@ function renderUploadPage() {
     formData.append('invoice', state.activeFile);
 
     statusEl.className = 'upload-status info';
-    statusEl.textContent = '⏳ Processing invoice...';
+    statusEl.textContent = 'Extracting fields and matching to ERP…';
 
     try {
       const response = await fetchWithTimeout('/api/invoices/upload', {
         method: 'POST',
+        headers: getToken() ? { Authorization: `Bearer ${getToken()}` } : {},
         body: formData
       }, 25000);
 
@@ -255,10 +287,18 @@ function renderUploadPage() {
       }
 
       state.selectedInvoiceId = data.invoice.id;
-      state.currentView = 'invoices';
-      await loadInvoices();
+      state.activeFile = null;
       state.currentView = 'invoice-detail';
-      renderInvoiceDetailPage(data.invoice);
+      const existingIndex = state.invoices.findIndex((item) => item.id === data.invoice.id);
+      if (existingIndex >= 0) state.invoices[existingIndex] = data.invoice;
+      else state.invoices.unshift(data.invoice);
+      refreshChrome();
+      renderView();
+      await loadInvoices();
+      const processedInvoice = state.invoices.find((item) => item.id === data.invoice.id) || data.invoice;
+      state.selectedInvoiceId = processedInvoice.id;
+      renderInvoiceDetailPage(processedInvoice);
+      showToast('Invoice processed and ready to review', 'success');
     } catch (error) {
       const message = error?.name === 'AbortError'
         ? 'Upload timed out. The server may be busy or unreachable.'
@@ -269,7 +309,7 @@ function renderUploadPage() {
             : error?.message || 'Unable to parse the uploaded invoice.';
 
       statusEl.className = 'upload-status error';
-      statusEl.textContent = '❌ ' + message;
+      statusEl.textContent = message;
     }
   });
 }
@@ -279,321 +319,32 @@ function escapeHtml(value) {
 }
 
 function renderInvoiceDetailPage(invoice) {
-  if (!invoice) {
-    appView.innerHTML = `<div class="page-shell"><div class="empty-state">
-      <div class="empty-state-icon">📋</div>
-      <div class="empty-state-title">No invoice selected</div>
-      <div class="empty-state-text">Select an invoice from the list to view details</div>
-    </div></div>`;
-    return;
-  }
-
-  const statusText = invoice.status || 'pending';
-  const statusClass = getStatusClass(statusText);
-  const confidence = invoice.confidence ?? 90;
-  const currencyFormatter = invoice.currency === 'INR' ? formatInr : formatMoney;
-  const pipelineStages = invoice.pipeline?.stages || [];
-  const checks = invoice.checks || [];
-  const workflow = Array.isArray(invoice.workflow) && invoice.workflow.length ? invoice.workflow : [
-    { step: 1, title: 'Invoice Ingestion', status: 'completed', detail: 'Invoice received and queued.' },
-    { step: 2, title: 'Data Extraction', status: 'completed', detail: 'Fields extracted and validated.' },
-    { step: 3, title: 'Vendor & PO Resolution', status: 'completed', detail: 'Vendor/PO reasoning complete.' },
-    { step: 4, title: 'ERP Record Pull', status: 'completed', detail: 'ERP records retrieved for matching.' },
-    { step: 5, title: 'Matching Engine', status: 'completed', detail: 'Quantity, rate, tax, and TDS checks executed.' },
-    { step: 6, title: 'AI Reasoning', status: 'completed', detail: 'Summary generated.' },
-    { step: 7, title: 'Decision Routing', status: 'warning', detail: 'Review decision issued.' },
-    { step: 8, title: 'Approval Action', status: 'pending', detail: 'Approval pending.' },
-    { step: 9, title: 'Posting to ERP', status: 'pending', detail: 'Waiting for final approval.' },
-    { step: 10, title: 'Post-Posting Reconciliation', status: 'pending', detail: 'Reconciliation pending.' }
-  ];
-
-  const reviewFieldsByGroup = {
-    'Supplier Information': [
-      ['vendor', 'Vendor Name'],
-      ['supplierName', 'Supplier Name'],
-      ['supplierGstin', 'Supplier GSTIN'],
-      ['supplierPan', 'Supplier PAN'],
-      ['supplierState', 'Supplier State'],
-      ['supplierAddress', 'Supplier Address']
-    ],
-    'Invoice Details': [
-      ['invoiceNumber', 'Invoice #'],
-      ['date', 'Invoice Date'],
-      ['po', 'PO Number'],
-      ['hsnCode', 'HSN/SAC'],
-      ['shipToDetails', 'Ship To Details']
-    ],
-    'Amount & Tax': [
-      ['amount', 'Total Amount'],
-      ['baseAmount', 'Base Amount'],
-      ['tax', 'Tax / GST'],
-      ['taxAmount', 'Tax Amount'],
-      ['totalAmount', 'Final Total']
-    ],
-    'Compliance & Signature': [
-      ['sealPresent', 'Seal Present'],
-      ['signaturePresent', 'Signature Present']
-    ]
-  };
-
-  const reviewForm = Object.entries(reviewFieldsByGroup).map(([groupTitle, fields]) => {
-    const groupFields = fields.map(([key, label]) => {
-      const value = invoice[key] ?? '';
-      const isBoolean = key === 'signaturePresent' || key === 'sealPresent';
-      const isNumeric = ['amount', 'tax', 'baseAmount', 'taxAmount', 'totalAmount'].includes(key);
-      const inputType = isBoolean ? 'checkbox' : 'text';
-      const checked = isBoolean ? Boolean(value) : '';
-      const textValue = isBoolean ? '' : escapeHtml(value);
-      const numericInput = isNumeric ? `inputmode="numeric"` : '';
-
-      return `
-        <div class="review-field-row">
-          <span>${label}</span>
-          ${isBoolean ? `
-            <label>
-              <input type="checkbox" data-edit-field="${key}" ${checked ? 'checked' : ''} />
-              <span>${value ? 'Yes' : 'No'}</span>
-            </label>
-          ` : `
-            <input
-              type="${inputType}"
-              data-edit-field="${key}"
-              value="${textValue}"
-              ${numericInput}
-              placeholder="Enter ${label.toLowerCase()}"
-            />
-          `}
-        </div>
-      `;
-    }).join('');
-
-    return `
-      <div class="review-field-group">
-        <h4 class="review-group-title">${groupTitle}</h4>
-        ${groupFields}
-      </div>
-    `;
-  }).join('');
-
-  const reviewContainer = `<div class="review-group-container">${reviewForm}</div>`;
-
-  appView.innerHTML = `
-    <div class="page-shell animate-fadeIn">
-      ${renderBreadcrumbBar([{ label: 'Invoices', link: 'invoices' }, { label: invoice.invoiceNumber, link: null }])}
-      
-      <div class="detail-header">
-        <button class="back-link" id="backToInvoices">← Back to invoices</button>
-        <div class="detail-actions">
-          <span class="status-badge ${statusClass} ${statusText.toLowerCase().includes('pending') ? 'pending' : ''}">${humanizeStatus(statusText)}</span>
-          <button class="secondary-button" id="editInvoiceButton">Edit</button>
-          <button class="primary-button" id="approveInvoiceButton">Approve & Post</button>
-          <button class="ghost-button" id="exportInvoiceButton">Export</button>
-        </div>
-      </div>
-
-      <div class="result-panel animate-slideUp">
-        <div class="result-header">
-          <div>
-            <div class="company-name">${invoice.vendor || 'Unknown vendor'}</div>
-            <div class="invoice-meta-line">Invoice #${invoice.invoiceNumber || 'N/A'}</div>
-          </div>
-          <span class="status-badge parsed">✓ Parsed Successfully</span>
-        </div>
-
-        <div class="metric-grid">
-          <div class="metric">
-            <span class="metric-label">📅 Issue Date</span>
-            <span class="metric-value">${invoice.date || 'N/A'}</span>
-          </div>
-          <div class="metric">
-            <span class="metric-label">💰 Amount</span>
-            <span class="metric-value">${currencyFormatter(invoice.amount || 0)}</span>
-          </div>
-          <div class="metric">
-            <span class="metric-label">📊 Confidence <span class="tooltip" data-tooltip="OCR/Extraction accuracy"><span class="tooltip-icon">?</span></span></span>
-            <span class="metric-value">${confidence}%</span>
-          </div>
-        </div>
-
-        <div class="total-box">
-          <span>Total Due</span>
-          <strong>${currencyFormatter(invoice.amount || 0)}</strong>
-        </div>
-      </div>
-
-      <div class="section-card animate-slideUp" style="margin-top: 22px; animation-delay: 0.1s;">
-        <h3 style="margin: 0 0 18px 0; color: var(--heading);">📋 Extracted Details</h3>
-        <div class="field-row"><span>Vendor</span><strong>${invoice.vendor || 'N/A'}</strong></div>
-        <div class="field-row"><span>Invoice #</span><strong>${invoice.invoiceNumber || 'N/A'}</strong></div>
-        <div class="field-row"><span>PO Number</span><strong>${invoice.po || 'N/A'}</strong></div>
-        <div class="field-row"><span>Date</span><strong>${invoice.date || 'N/A'}</strong></div>
-        <div class="field-row"><span>Amount</span><strong>${currencyFormatter(invoice.amount || 0)}</strong></div>
-        <div class="field-row"><span>Tax/GST</span><strong>${currencyFormatter(invoice.tax || 0)}</strong></div>
-        <div class="field-row"><span>Currency</span><strong>${invoice.currency || 'USD'}</strong></div>
-        <div class="field-row"><span>HSN/SAC</span><strong>${invoice.hsnCode || 'N/A'}</strong></div>
-        <div class="field-row"><span>Description</span><strong>${invoice.description || 'N/A'}</strong></div>
-      </div>
-
-      <div class="section-card animate-slideUp" style="margin-top: 22px; animation-delay: 0.15s;">
-        <div style="display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 16px; flex-wrap: wrap;">
-          <h3 style="margin: 0; color: var(--heading);">🧾 Review & Correct Extracted Fields</h3>
-          <button class="primary-button" id="saveReviewButton" type="button">Save review</button>
-        </div>
-        ${reviewForm}
-      </div>
-
-      <div class="section-card animate-slideUp" style="margin-top: 22px; animation-delay: 0.15s;">
-        <h3 style="margin: 0 0 18px 0; color: var(--heading);">⚙️ ERP Validation Checks</h3>
-        ${checks.length ? checks.map((check, i) => `
-          <div class="list-item" style="animation-delay: ${0.2 + i * 0.05}s;">
-            <div style="display: flex; justify-content: space-between; align-items: center;">
-              <div>
-                <div style="font-weight: 600; color: var(--heading);">${check.name}</div>
-                <div style="color: var(--muted); font-size: 0.85rem; margin-top: 4px;">${check.detail}</div>
-              </div>
-              <span class="badge ${check.passed ? 'badge-success' : 'badge-danger'}">${check.passed ? '✓ Pass' : '✗ Fail'}</span>
-            </div>
-          </div>
-        `).join('') : '<div style="color: var(--muted);">No checks available</div>'}
-      </div>
-
-      <div class="section-card animate-slideUp" style="margin-top: 22px; animation-delay: 0.2s;">
-        <h3 style="margin: 0 0 18px 0; color: var(--heading);">🔍 AI Reasoning</h3>
-        ${invoice.aiSummary ? `<div style="color: var(--heading); line-height: 1.6;">${invoice.aiSummary}</div>` : '<div style="color: var(--muted);">No AI reasoning available</div>'}
-      </div>
-
-      <div class="section-card animate-slideUp" style="margin-top: 22px; animation-delay: 0.25s;">
-        <h3 style="margin: 0 0 18px 0; color: var(--heading);">📘 Workflow Timeline</h3>
-        <div style="display: grid; gap: 12px;">
-          ${workflow.map((step) => {
-            const stepColor = getStepColor(step.status);
-            return `
-              <div style="display:grid; grid-template-columns: 32px 1fr 120px; gap: 12px; align-items: start; padding: 10px 12px; border-radius: 10px; background: rgba(255,255,255,0.02); border-left: 3px solid ${stepColor};">
-                <div style="font-weight:700; color: var(--heading);">${step.step}</div>
-                <div>
-                  <div style="font-weight:600; color: var(--heading); margin-bottom: 4px;">${step.title}</div>
-                  <div style="color: var(--muted); font-size: 0.85rem; line-height: 1.5;">${step.detail}</div>
-                </div>
-                <div style="justify-self:end; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; color: ${stepColor}; font-weight:700;">${step.status}</div>
-              </div>
-            `;
-          }).join('')}
-        </div>
-      </div>
-
-      ${pipelineStages.length ? `
-        <div class="section-card animate-slideUp" style="margin-top: 22px; animation-delay: 0.3s;">
-          <h3 style="margin: 0 0 18px 0; color: var(--heading);">🔄 Processing Pipeline</h3>
-          <div style="display: grid; gap: 12px;">
-            ${pipelineStages.map((stage) => {
-              const stageColor = getStepColor(stage.status);
-              const badgeClass = getStatusBadgeClass(stage.status);
-              return `
-                <div style="display: flex; align-items: center; gap: 12px; padding: 10px 12px; background: rgba(255,255,255,0.01); border-radius: 8px; border-left: 3px solid ${stageColor};">
-                  <span style="color: var(--muted); font-size: 0.85rem; text-transform: uppercase; font-weight: 600; min-width: 140px;">${stage.stage.replaceAll('_', ' ')}</span>
-                  <span class="status-badge ${badgeClass}">${stage.status}</span>
-                  <span style="color: var(--muted); font-size: 0.85rem;">${stage.detail}</span>
-                </div>
-              `;
-            }).join('')}
-          </div>
-        </div>
-      ` : ''}
-    </div>
-  `;
-
-  document.getElementById('backToInvoices').addEventListener('click', () => {
-    state.currentView = 'invoices';
-    renderView();
-  });
-
-  document.getElementById('saveReviewButton')?.addEventListener('click', async () => {
-    const payload = {};
-    document.querySelectorAll('[data-edit-field]').forEach((input) => {
-      const field = input.dataset.editField;
-      if (input.type === 'checkbox') {
-        payload[field] = input.checked;
-        return;
-      }
-      const raw = input.value.trim();
-      if (raw === '') {
-        payload[field] = null;
-        return;
-      }
-      payload[field] = ['amount', 'tax', 'baseAmount', 'taxAmount', 'totalAmount'].includes(field) ? Number(raw) : raw;
-    });
-
-    try {
-      const response = await fetch(`/api/invoices/${invoice.id}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data?.error || 'Review update failed');
-
-      const updatedInvoice = data.invoice;
-      const index = state.invoices.findIndex((item) => item.id === updatedInvoice.id);
-      if (index >= 0) state.invoices[index] = updatedInvoice;
-      state.selectedInvoiceId = updatedInvoice.id;
-      renderInvoiceDetailPage(updatedInvoice);
-      showToast('Invoice review saved and queued for approval', 'success');
-    } catch (error) {
-      showToast(error?.message || 'Unable to save review changes', 'error');
-    }
-  });
-
-  document.getElementById('approveInvoiceButton')?.addEventListener('click', async () => {
-    try {
-      const response = await fetch(`/api/invoices/${invoice.id}/action`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'approve' })
-      });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data?.error || 'Approval failed');
-      const index = state.invoices.findIndex((item) => item.id === data.invoice.id);
-      if (index >= 0) state.invoices[index] = data.invoice;
-      renderInvoiceDetailPage(data.invoice);
-      showToast('Invoice approved and ready for posting', 'success');
-    } catch (error) {
-      showToast(error?.message || 'Approval could not be completed', 'error');
-    }
-  });
-
-  document.getElementById('exportInvoiceButton')?.addEventListener('click', () => {
-    showPremiumModal({
-      title: 'Export invoice package',
-      confirmText: 'Download JSON',
-      bodyHtml: `
-        <div class="modal-content-stack">
-          <div class="summary-pill">Invoice #${invoice.invoiceNumber || 'N/A'}</div>
-          <p>Export the selected invoice with validation checks, recommendations, and audit metadata for downstream ERP processing.</p>
-          <div class="modal-metrics">
-            <div><strong>${invoice.vendor || 'Unknown vendor'}</strong><span>Vendor</span></div>
-            <div><strong>${formatMoney(invoice.amount || 0)}</strong><span>Amount</span></div>
-            <div><strong>${invoice.confidence ?? 0}%</strong><span>Confidence</span></div>
-          </div>
-        </div>
-      `,
-      onConfirm: () => initExportPreview([invoice], 'json')
-    });
-  });
-
-  document.getElementById('editInvoiceButton')?.addEventListener('click', () => {
-    const firstField = document.querySelector('[data-edit-field]');
-    firstField?.focus();
+  renderInvoiceDetailModule({
+    appView,
+    invoice,
+    state,
+    renderBreadcrumbBar,
+    renderView,
+    showToast,
+    showPremiumModal,
+    initExportPreview,
+    refreshChrome
   });
 }
 
 function getFilteredInvoices() {
   const rows = state.invoices || [];
   return rows.filter((invoice) => {
-    const vendor = String(invoice.vendor || '').toLowerCase();
-    const invoiceNumber = String(invoice.invoiceNumber || '').toLowerCase();
+    const haystack = `${invoice.vendor || ''} ${invoice.invoiceNumber || ''} ${invoice.po || ''} ${invoice.status || ''} ${invoice.statusLabel || ''}`.toLowerCase();
     const query = String(state.searchQuery || '').trim().toLowerCase();
-    const matchesSearch = !query || vendor.includes(query) || invoiceNumber.includes(query);
-    const matchesFilter = state.filterStatus === 'all' || String(invoice.status || '').toLowerCase().includes(state.filterStatus.toLowerCase());
+    const matchesSearch = !query || haystack.includes(query);
+    const status = String(invoice.status || '').toLowerCase();
+    const filter = state.filterStatus;
+    const matchesFilter = filter === 'all'
+      || (filter === 'posted' && status.includes('posted'))
+      || (filter === 'review' && (status.includes('review') || status === 'query_open' || status === 'ready_to_post'))
+      || (filter === 'hold' && status.includes('hold'))
+      || (filter === 'failed' && (status.includes('fail') || status.includes('reject')));
     return matchesSearch && matchesFilter;
   });
 }
@@ -606,21 +357,20 @@ function toggleInvoiceSelection(invoiceId) {
   renderInvoicesPage();
 }
 
-function applyBulkAction(action) {
+async function applyBulkAction(action) {
   if (!state.bulkSelectedIds.length) return;
-
-  const selected = state.invoices.filter((invoice) => state.bulkSelectedIds.includes(invoice.id));
-  pushHistory();
-
-  selected.forEach((invoice) => {
-    if (action === 'approve') invoice.status = 'Auto-posted';
-    if (action === 'reject') invoice.status = 'Query open';
-    if (action === 'hold') invoice.status = 'On hold';
-  });
-
+  const mapped = action === 'approve' ? 'approve' : action;
+  for (const id of state.bulkSelectedIds) {
+    const response = await apiFetch(`/api/invoices/${id}/action`, { method: 'POST', body: JSON.stringify({ action: mapped }) });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      showToast(data.error || 'Bulk update failed', 'error');
+      return;
+    }
+  }
   state.bulkSelectedIds = [];
-  showToast(`${selected.length} invoice(s) updated`, 'success');
-  renderView();
+  await loadInvoices();
+  showToast('Selected invoices updated', 'success');
 }
 
 function renderInvoicesPage() {
@@ -638,19 +388,19 @@ function renderInvoicesPage() {
       <div class="invoices-header">
         <div>
           <h2 style="margin: 0; color: var(--heading);">All Invoices</h2>
-          <div class="invoices-subtitle">📊 ${rows.length} total • 📋 ${posted} posted • 👁️ ${review} review • ❌ ${failed} failed</div>
+          <div class="invoices-subtitle">${rows.length} total · ${posted} posted · ${review} in review · ${failed} failed</div>
         </div>
         <button class="primary-button" id="uploadFromInvoices">+ Upload</button>
       </div>
 
       <div class="search-bar">
-        <input type="text" class="search-input" id="searchInput" placeholder="Search by vendor or invoice #..." value="${state.searchQuery}" />
+        <input type="text" class="search-input" id="searchInput" placeholder="Vendor, invoice, PO, or status" value="${state.searchQuery}" />
         <div class="filter-group">
           <button class="filter-btn ${state.filterStatus === 'all' ? 'active' : ''}" data-filter="all">All</button>
           <button class="filter-btn ${state.filterStatus === 'posted' ? 'active' : ''}" data-filter="posted">Posted</button>
           <button class="filter-btn ${state.filterStatus === 'review' ? 'active' : ''}" data-filter="review">Review</button>
+          <button class="filter-btn ${state.filterStatus === 'hold' ? 'active' : ''}" data-filter="hold">On hold</button>
           <button class="filter-btn ${state.filterStatus === 'failed' ? 'active' : ''}" data-filter="failed">Failed</button>
-          <button class="filter-btn" id="advFilterBtn" style="margin-left: auto; background: rgba(14, 165, 233, 0.08); color: #0ea5e9; border-color: #0ea5e9;">⚙️ Filters</button>
         </div>
       </div>
 
@@ -675,9 +425,10 @@ function renderInvoicesPage() {
           <span>Amount</span>
           <span>Confidence</span>
           <span>Status</span>
+          <span>Open</span>
         </div>
-        ${filteredRows.length ? filteredRows.map((invoice, idx) => `
-          <div class="table-row" data-invoice-id="${invoice.id}" tabindex="0" style="cursor:pointer; animation-delay: ${0.05 + idx * 0.02}s;">
+        ${filteredRows.length ? filteredRows.map((invoice) => `
+          <div class="table-row" data-invoice-id="${invoice.id}" tabindex="0">
             <span class="table-select"><input type="checkbox" class="row-select" data-invoice-id="${invoice.id}" ${state.bulkSelectedIds.includes(invoice.id) ? 'checked' : ''} /></span>
             <span class="vendor-badge"><span class="vendor-dot"></span>${invoice.vendor || 'Unknown vendor'}</span>
             <span class="invoice-num">#${invoice.invoiceNumber || 'N/A'}</span>
@@ -685,10 +436,8 @@ function renderInvoicesPage() {
             <span class="invoice-amount">${(invoice.currency === 'INR' ? formatInr : formatMoney)(invoice.amount || 0)}</span>
             <span><div class="confidence-badge" style="background: linear-gradient(to right, #10b981 0%, #10b981 ${invoice.confidence ?? 0}%, #e5e7eb ${invoice.confidence ?? 0}%, #e5e7eb 100%);" title="Confidence: ${invoice.confidence ?? 0}%"></div></span>
             <span><span class="table-status ${getStatusClass(invoice.status)}">${humanizeStatus(invoice.status || 'pending')}</span></span>
-            <span class="row-actions" style="opacity: 0; position: absolute; right: 16px;">
-              <button class="quick-action-btn" title="View">👁️</button>
-              <button class="quick-action-btn" title="Approve">✓</button>
-              <button class="quick-action-btn" title="More">⋮</button>
+            <span>
+              <button class="quick-action-btn" data-quick="view" data-invoice-id="${invoice.id}" type="button" title="Review">Open</button>
             </span>
           </div>
         `).join('') : `<div class="empty-state">
@@ -710,10 +459,6 @@ function renderInvoicesPage() {
       state.filterStatus = btn.dataset.filter;
       renderInvoicesPage();
     });
-  });
-
-  document.getElementById('advFilterBtn')?.addEventListener('click', () => {
-    showToast('Advanced filters coming soon', 'info');
   });
 
   document.querySelectorAll('.bulk-btn[data-bulk-action]').forEach((btn) => {
@@ -741,9 +486,35 @@ function renderInvoicesPage() {
     });
   });
 
+  document.querySelectorAll('.table-row[data-invoice-id]').forEach((row) => {
+    row.addEventListener('click', () => {
+      const item = state.invoices.find((invoice) => invoice.id === row.dataset.invoiceId);
+      if (!item) return;
+      state.selectedInvoiceId = item.id;
+      state.currentView = 'invoice-detail';
+      renderInvoiceDetailPage(item);
+    });
+    row.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter' && event.key !== ' ') return;
+      event.preventDefault();
+      row.click();
+    });
+  });
+
   document.getElementById('uploadFromInvoices')?.addEventListener('click', () => {
     state.currentView = 'upload';
     renderView();
+  });
+
+  appView.querySelectorAll('[data-quick="view"]').forEach((button) => {
+    button.addEventListener('click', (event) => {
+      event.stopPropagation();
+      const item = state.invoices.find((invoice) => invoice.id === button.dataset.invoiceId);
+      if (!item) return;
+      state.selectedInvoiceId = item.id;
+      state.currentView = 'invoice-detail';
+      renderInvoiceDetailPage(item);
+    });
   });
 
   appView.querySelectorAll('[data-invoice-id]').forEach((row) => {
@@ -770,331 +541,6 @@ function renderInvoicesPage() {
         toggleInvoiceSelection(row.dataset.invoiceId);
       }
     });
-  });
-}
-
-function renderWorkflowPage() {
-  const workflows = state.invoices.map((invoice) => ({
-    ...invoice,
-    workflow: Array.isArray(invoice.workflow) && invoice.workflow.length ? invoice.workflow : [
-      { step: 1, title: 'Invoice Ingestion', status: 'completed', detail: 'Invoice received and queued for processing.' },
-      { step: 2, title: 'Data Extraction', status: 'completed', detail: 'Extraction and field validation complete.' },
-      { step: 3, title: 'Vendor & PO Resolution', status: 'completed', detail: 'Vendor and PO resolution evaluated.' },
-      { step: 4, title: 'ERP Record Pull', status: 'completed', detail: 'ERP data pull completed.' },
-      { step: 5, title: 'Matching Engine', status: 'completed', detail: 'Quantity, rate, tax, and TDS checks executed.' },
-      { step: 6, title: 'AI Reasoning', status: 'completed', detail: 'AI reasoning summary generated.' },
-      { step: 7, title: 'Decision Routing', status: 'warning', detail: 'Review queue triggered for follow-up.' },
-      { step: 8, title: 'Approval Action', status: 'pending', detail: 'Awaiting reviewer approval.' },
-      { step: 9, title: 'Posting to ERP', status: 'pending', detail: 'Posting waits for approval.' },
-      { step: 10, title: 'Post-Posting Reconciliation', status: 'pending', detail: 'Awaiting reconciliation.' }
-    ]
-  }));
-
-  appView.innerHTML = `
-    <div class="page-shell animate-fadeIn">
-      ${renderBreadcrumbBar([{ label: 'Workflow', link: null }])}
-      
-      <div class="page-header">
-        <div>
-          <h1 class="page-title">Invoice Workflow</h1>
-          <p class="page-subtitle">End-to-end processing pipeline from ingestion to ERP posting and reconciliation.</p>
-        </div>
-      </div>
-
-      <div style="display: grid; gap: 20px;">
-        ${workflows.map((invoice) => `
-          <div class="section-card animate-slideUp">
-            <div style="display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom: 18px;">
-              <div>
-                <h3 style="margin:0; color: var(--heading);">${invoice.vendor || 'Unknown vendor'}</h3>
-                <div style="color: var(--muted); font-size: 0.85rem; margin-top: 4px;">${invoice.invoiceNumber || 'N/A'} • ${invoice.date || 'N/A'}</div>
-              </div>
-              <span class="status-badge ${getStatusClass(invoice.status)}">${humanizeStatus(invoice.status)}</span>
-            </div>
-            <div style="display:grid; gap: 12px;">
-              ${invoice.workflow.map((step) => {
-                const stepColor = getStepColor(step.status);
-                return `
-                  <div style="display:grid; grid-template-columns: 32px 1fr 120px; gap: 12px; align-items: start; padding: 10px 12px; border-radius: 10px; background: rgba(255,255,255,0.02); border-left: 3px solid ${stepColor};">
-                    <div style="font-weight:700; color: var(--heading);">${step.step}</div>
-                    <div>
-                      <div style="font-weight:600; color: var(--heading); margin-bottom: 4px;">${step.title}</div>
-                      <div style="color: var(--muted); font-size: 0.85rem; line-height: 1.5;">${step.detail}</div>
-                    </div>
-                    <div style="justify-self:end; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; color: ${stepColor}; font-weight: 700;">${step.status}</div>
-                  </div>
-                `;
-              }).join('')}
-            </div>
-          </div>
-        `).join('')}
-      </div>
-    </div>
-  `;
-}
-
-function renderExportsPage() {
-  appView.innerHTML = `
-    <div class="page-shell animate-fadeIn">
-      ${renderBreadcrumbBar([{ label: 'Exports', link: null }])}
-      
-      <div class="page-header">
-        <div>
-          <h1 class="page-title">Export Data</h1>
-          <p class="page-subtitle">Download your invoices in multiple formats for integration with ERP systems.</p>
-        </div>
-      </div>
-
-      <div class="section-card animate-slideUp">
-        <h3 style="margin-top:0; margin-bottom:20px; color: var(--heading);">Select Export Format</h3>
-        <div class="exports-grid">
-          <button class="export-card ${state.exportType === 'json' ? 'selected' : ''}" data-export="json" type="button">
-            <h3 style="margin: 0 0 8px; color: var(--heading);">📄 JSON</h3>
-            <p style="margin: 0; color: var(--muted); font-size: 0.9rem;">Machine-readable format with all fields and validations included</p>
-          </button>
-          <button class="export-card ${state.exportType === 'csv' ? 'selected' : ''}" data-export="csv" type="button">
-            <h3 style="margin: 0 0 8px; color: var(--heading);">📊 CSV</h3>
-            <p style="margin: 0; color: var(--muted); font-size: 0.9rem;">Spreadsheet format, one row per invoice for easy analysis</p>
-          </button>
-        </div>
-
-        <div style="margin-top: 28px; padding-top: 20px; border-top: 1px solid var(--line);">
-          <h4 style="color: var(--heading); margin: 0 0 12px 0;">Export ${state.invoices.length} invoices as ${state.exportType.toUpperCase()}</h4>
-          <div style="display: flex; gap: 12px;">
-            <button class="primary-button export-button" id="previewButton" type="button">👁️ Preview Export</button>
-            <button class="secondary-button export-button" id="downloadButton" type="button">⬇️ Download</button>
-          </div>
-        </div>
-      </div>
-
-      <div class="section-card animate-slideUp" style="margin-top: 22px; animation-delay: 0.1s;">
-        <h3 style="margin-top: 0; color: var(--heading);">💡 About Exports</h3>
-        <div style="color: var(--muted); line-height: 1.8; font-size: 0.9rem;">
-          <p>• <strong>JSON</strong> includes complete invoice data, validation checks, AI reasoning, and ERP matching results</p>
-          <p>• <strong>CSV</strong> provides a tabular view optimized for spreadsheet applications and data analysis</p>
-          <p>• All exports include timestamp and processing metadata for audit trails</p>
-        </div>
-      </div>
-    </div>
-  `;
-
-  appView.querySelectorAll('[data-export]').forEach((card) => {
-    card.addEventListener('click', () => {
-      state.exportType = card.dataset.export;
-      renderExportsPage();
-    });
-  });
-
-  document.getElementById('previewButton')?.addEventListener('click', () => {
-    initExportPreview(state.invoices, state.exportType);
-  });
-
-  document.getElementById('downloadButton')?.addEventListener('click', () => {
-    const data = state.exportType === 'json' ? state.invoices : state.invoices.map((inv) => ({
-      vendor: inv.vendor,
-      invoiceNumber: inv.invoiceNumber,
-      date: inv.date,
-      amount: inv.amount,
-      status: inv.status,
-      confidence: inv.confidence
-    }));
-    
-    let content, filename, mimeType;
-    if (state.exportType === 'json') {
-      content = JSON.stringify(data, null, 2);
-      filename = `invoices-export-${Date.now()}.json`;
-      mimeType = 'application/json';
-    } else {
-      content = [
-        ['Vendor', 'Invoice Number', 'Date', 'Amount', 'Status', 'Confidence'],
-        ...data.map((inv) => [inv.vendor, inv.invoiceNumber, inv.date, inv.amount, inv.status, inv.confidence])
-      ].map((row) => row.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(',')).join('\n');
-      filename = `invoices-export-${Date.now()}.csv`;
-      mimeType = 'text/csv';
-    }
-    
-    const blob = new Blob([content], { type: mimeType });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = filename;
-    link.click();
-    URL.revokeObjectURL(url);
-    
-    showToastNotification(`Exported ${data.length} invoices to ${filename}`, 'success');
-  });
-}
-
-function renderDashboardPage() {
-  const metrics = {
-    total: state.invoices.length,
-    posted: state.invoices.filter((invoice) => !['failed', 'on hold'].includes(String(invoice.status || '').toLowerCase())).length,
-    failed: state.invoices.filter((invoice) => String(invoice.status || '').toLowerCase().includes('failed')).length,
-    volume: state.invoices.reduce((sum, invoice) => sum + Number(invoice.amount || 0), 0),
-    avgConfidence: state.invoices.length ? (state.invoices.reduce((sum, invoice) => sum + (invoice.confidence ?? 0), 0) / state.invoices.length).toFixed(1) : 0
-  };
-
-  const statusCounts = {
-    posted: state.invoices.filter((invoice) => String(invoice.status || '').toLowerCase().includes('posted')).length,
-    review: state.invoices.filter((invoice) => String(invoice.status || '').toLowerCase().includes('review')).length,
-    failed: state.invoices.filter((invoice) => String(invoice.status || '').toLowerCase().includes('failed')).length,
-    hold: state.invoices.filter((invoice) => String(invoice.status || '').toLowerCase().includes('hold')).length
-  };
-
-  const maxStatusValue = Math.max(...Object.values(statusCounts), 1);
-  const riskScore = Math.min(98, Math.max(72, Number(metrics.avgConfidence) + 10));
-
-  appView.innerHTML = `
-    <div class="page-shell animate-fadeIn dashboard-shell">
-      ${renderBreadcrumbBar([{ label: 'Dashboard', link: null }])}
-
-      <div class="dashboard-hero section-card animate-slideUp">
-        <div>
-          <div class="eyebrow">Operations overview</div>
-          <h1 class="page-title dashboard-title">Invoice Intelligence</h1>
-          <p class="page-subtitle">Real-time financial processing overview across ERP validation, approvals, and exceptions.</p>
-        </div>
-        <div class="hero-summary">
-          <span class="mini-pill success">Live</span>
-          <strong>${formatMoney(metrics.volume)}</strong>
-          <small>Processed volume</small>
-        </div>
-      </div>
-
-      <div class="stats-grid">
-        <div class="stat-box animate-slideUp">
-          <div class="stat-label">📦 Total Invoices</div>
-          <div class="stat-value">${metrics.total}</div>
-          <div class="stat-trend positive">+12.4% this week</div>
-        </div>
-        <div class="stat-box animate-slideUp" style="animation-delay: 0.05s;">
-          <div class="stat-label">✅ Posted</div>
-          <div class="stat-value">${metrics.posted}</div>
-          <div class="stat-trend positive">Stable throughput</div>
-        </div>
-        <div class="stat-box animate-slideUp" style="animation-delay: 0.1s;">
-          <div class="stat-label">⚠️ Exceptions</div>
-          <div class="stat-value">${metrics.failed}</div>
-          <div class="stat-trend warning">Needs review</div>
-        </div>
-        <div class="stat-box animate-slideUp" style="animation-delay: 0.15s;">
-          <div class="stat-label">📊 Confidence</div>
-          <div class="stat-value">${metrics.avgConfidence}%</div>
-          <div class="stat-trend positive">Excellent extraction</div>
-        </div>
-      </div>
-
-      <div class="action-row">
-        <div class="action-card animate-slideUp" style="animation-delay: 0.2s;">
-          <div class="action-icon">📤</div>
-          <div class="action-label">Upload Invoice</div>
-        </div>
-        <div class="action-card animate-slideUp" style="animation-delay: 0.25s;">
-          <div class="action-icon">👁️</div>
-          <div class="action-label">Pending Reviews</div>
-        </div>
-        <div class="action-card animate-slideUp" style="animation-delay: 0.3s;">
-          <div class="action-icon">📊</div>
-          <div class="action-label">Export Summary</div>
-        </div>
-      </div>
-
-      <div class="insights-grid">
-        <div class="section-card animate-slideUp">
-          <div class="card-header-row">
-            <h3>Processing mix</h3>
-            <span class="mini-pill neutral">This month</span>
-          </div>
-          <div class="chart-bars">
-            ${Object.entries(statusCounts).map(([label, count]) => `
-              <div class="chart-row">
-                <div class="chart-label">${label.charAt(0).toUpperCase() + label.slice(1)}</div>
-                <div class="chart-bar-track">
-                  <div class="chart-bar ${label}" style="width: ${(count / maxStatusValue) * 100}%"></div>
-                </div>
-                <div class="chart-value">${count}</div>
-              </div>
-            `).join('')}
-          </div>
-        </div>
-
-        <div class="section-card animate-slideUp" style="animation-delay: 0.05s;">
-          <div class="card-header-row">
-            <h3>AI risk score</h3>
-            <span class="mini-pill warning">Moderate</span>
-          </div>
-          <div class="score-ring-wrap">
-            <div class="score-ring" style="--score: ${riskScore};">
-              <span>${Math.round(riskScore)}</span>
-            </div>
-            <ul class="ring-list">
-              <li><span class="dot primary"></span> Vendor matching 96%</li>
-              <li><span class="dot success"></span> Tax compliance 89%</li>
-              <li><span class="dot warning"></span> Approval queue 74%</li>
-            </ul>
-          </div>
-        </div>
-      </div>
-
-      <div class="bottom-grid">
-        <div class="section-card animate-slideUp">
-          <div class="card-header-row">
-            <h3>Audit trail</h3>
-            <span class="mini-pill info">Live</span>
-          </div>
-          <div class="timeline">
-            <div class="timeline-item">
-              <div class="timeline-marker"></div>
-              <div class="timeline-content">
-                <div class="timeline-time">Today • 09:40</div>
-                <div class="timeline-title">Invoice scanned and validated</div>
-                <div class="timeline-description">Vendor, PO, and GST fields matched against ERP context</div>
-              </div>
-            </div>
-            <div class="timeline-item">
-              <div class="timeline-marker"></div>
-              <div class="timeline-content">
-                <div class="timeline-time">Today • 10:15</div>
-                <div class="timeline-title">Review queue updated</div>
-                <div class="timeline-description">2 invoices flagged for tax variance and manual approval</div>
-              </div>
-            </div>
-            <div class="timeline-item">
-              <div class="timeline-marker"></div>
-              <div class="timeline-content">
-                <div class="timeline-time">Today • 11:05</div>
-                <div class="timeline-title">ERP posting batch approved</div>
-                <div class="timeline-description">Posting summary exported and archived for audit traceability</div>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div class="section-card animate-slideUp" style="animation-delay: 0.1s;">
-          <div class="card-header-row">
-            <h3>Recent activity</h3>
-            <button class="link-button" id="viewAllInvoices">View all</button>
-          </div>
-          ${state.invoices.slice(0, 5).length ? state.invoices.slice(0, 5).map((invoice) => `
-            <div class="list-item recent-item">
-              <div>
-                <div class="recent-vendor">${invoice.vendor || 'Unknown vendor'}</div>
-                <div class="recent-meta">${invoice.invoiceNumber || 'N/A'} • ${invoice.date || 'N/A'}</div>
-              </div>
-              <div class="recent-side">
-                <div class="recent-amount">${formatMoney(invoice.amount || 0)}</div>
-                <span class="badge ${getStatusClass(invoice.status)}">${humanizeStatus(invoice.status)}</span>
-              </div>
-            </div>
-          `).join('') : '<div style="color: var(--muted);">No recent invoices</div>'}
-        </div>
-      </div>
-    </div>
-  `;
-
-  document.getElementById('viewAllInvoices')?.addEventListener('click', () => {
-    state.currentView = 'invoices';
-    renderView();
   });
 }
 
@@ -1152,6 +598,7 @@ function renderPlaceholderPage(view) {
 }
 
 function renderView() {
+  state.darkMode = localStorage.getItem('darkMode') === 'true' || localStorage.getItem('theme') === 'dark';
   document.body.classList.toggle('dark-mode', state.darkMode);
   refreshFloatingActions();
   renderNav();
@@ -1168,6 +615,9 @@ function renderView() {
       break;
     case 'exports':
       renderExportsModule({ appView, state, renderBreadcrumbBar });
+      break;
+    case 'exceptions':
+      renderExceptionsPage({ appView, state, renderBreadcrumbBar, formatMoney });
       break;
     case 'dashboard':
       renderDashboardModule({ appView, state, renderBreadcrumbBar, formatMoney, getStatusClass, humanizeStatus });
@@ -1190,10 +640,7 @@ function renderView() {
 }
 
 document.querySelectorAll('.nav-item').forEach((button) => {
-  button.addEventListener('click', () => {
-    state.currentView = button.dataset.view;
-    renderView();
-  });
+  button.addEventListener('click', () => navigateTo(button.dataset.view));
 });
 
 // Initialize dark mode
@@ -1205,12 +652,7 @@ if (themeToggleBtn) {
   setupThemeToggle(themeToggleBtn);
 }
 
-const sidebar = document.querySelector('.sidebar');
-const sidebarToggle = document.createElement('button');
-sidebarToggle.className = 'sidebar-toggle';
-sidebarToggle.textContent = '⟨';
-sidebarToggle.addEventListener('click', toggleSidebarCollapse);
-sidebar.querySelector('.topbar-brand').appendChild(sidebarToggle);
+document.getElementById('sidebarToggle')?.addEventListener('click', toggleSidebarCollapse);
 
 const floatingActionBar = document.createElement('div');
 floatingActionBar.className = 'floating-actions';
@@ -1224,7 +666,7 @@ document.body.appendChild(floatingActionBar);
 document.getElementById('undoAction')?.addEventListener('click', undoLastAction);
 document.getElementById('redoAction')?.addEventListener('click', redoLastAction);
 document.getElementById('helpAction')?.addEventListener('click', () => {
-  showToast('Shortcut keys: U Upload, D Dashboard, I Invoices, W Workflow, E Exports, Esc back, Z Undo, Y Redo', 'info');
+  showToast('Shortcuts: X Exceptions, U Upload, D Dashboard, I Invoices, W Workflow, E Exports', 'info');
 });
 
 function refreshFloatingActions() {
@@ -1242,6 +684,7 @@ enableKeyboardShortcuts({
   'u': () => { state.currentView = 'upload'; renderView(); },
   'd': () => { state.currentView = 'dashboard'; renderView(); },
   'i': () => { state.currentView = 'invoices'; renderView(); },
+  'x': () => { state.currentView = 'exceptions'; renderView(); },
   'w': () => { state.currentView = 'workflow'; renderView(); },
   'e': () => { state.currentView = 'exports'; renderView(); }
 });
@@ -1264,70 +707,210 @@ document.addEventListener('click', (e) => {
     return;
   }
 
-  // Action card clicks on dashboard
   if (e.target.closest('.action-card')) {
-    const label = e.target.closest('.action-card').querySelector('.action-label').textContent;
-    if (label.includes('Upload')) {
-      state.currentView = 'upload';
-      renderView();
-    } else if (label.includes('View Pending')) {
-      state.filterStatus = 'review';
-      state.currentView = 'invoices';
-      renderView();
-    } else if (label.includes('Export')) {
-      state.currentView = 'exports';
+    const route = e.target.closest('.action-card').dataset.route;
+    if (route) {
+      state.currentView = route;
+      if (route === 'exceptions') state.filterStatus = 'review';
       renderView();
     }
+    return;
   }
-  
-  // Dashboard link from recent activity
-  if (e.target.closest('.list-item')) {
-    const cardContent = e.target.closest('.list-item');
-    if (cardContent && state.currentView === 'dashboard') {
-      state.currentView = 'invoices';
-      renderView();
+
+  if (e.target.closest('.list-item') && state.currentView === 'dashboard') {
+    return;
+  }
+});
+
+function refreshChrome() {
+  const user = getUser();
+  state.user = user;
+  const name = document.getElementById('profileName');
+  const role = document.getElementById('profileRole');
+  const avatar = document.getElementById('profileAvatar');
+  const queue = document.getElementById('queueCount');
+  if (name) name.textContent = user?.name || 'Sign in';
+  if (role) role.textContent = user?.role?.replaceAll('_', ' ') || 'Restricted';
+  if (avatar) avatar.textContent = (user?.name || 'EM').split(' ').map((part) => part[0]).join('').slice(0, 2).toUpperCase();
+  if (queue) queue.textContent = String(state.metrics?.exceptions || 0);
+
+  const menu = document.getElementById('accountMenu');
+  if (menu) {
+    menu.innerHTML = user ? `
+      <div style="padding:8px 10px; color:var(--muted); font-size:0.8rem;">${user.email}<br>${user.role.replaceAll('_', ' ')}</div>
+      <button type="button" data-demo-email="finance@easyme.local">Switch to finance</button>
+      <button type="button" data-demo-email="manager@easyme.local">Switch to manager</button>
+      <button type="button" data-demo-email="clerk@easyme.local">Switch to clerk</button>
+      <button type="button" id="signOutButton">Sign out</button>
+    ` : '<button type="button" id="signOutButton">Sign in</button>';
+  }
+
+  const notices = document.getElementById('noticePanel');
+  if (notices) {
+    const items = (state.audit || []).slice(0, 6);
+    notices.innerHTML = items.length
+      ? items.map((entry) => `<button class="notice-item" type="button"><strong>${entry.action || 'Event'}</strong><div style="color:var(--muted);font-size:0.78rem;">${entry.detail || ''}</div></button>`).join('')
+      : '<div class="notice-item">No alerts yet</div>';
+  }
+}
+
+function showLogin(visible) {
+  document.getElementById('loginGate')?.classList.toggle('hidden', !visible);
+  document.body.classList.toggle('is-authed', !visible);
+}
+
+async function bootstrapSession() {
+  if (!getToken()) {
+    showLogin(true);
+    return;
+  }
+  const me = await apiFetch('/api/auth/me');
+  if (!me.ok) {
+    clearSession();
+    showLogin(true);
+    return;
+  }
+  const payload = await me.json();
+  state.user = payload.user;
+  showLogin(false);
+  state.currentView = 'exceptions';
+  refreshChrome();
+  await loadInvoices();
+}
+
+// Initialize integrations
+async function initializeIntegrations() {
+  return;
+}
+
+document.getElementById('loginForm')?.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const email = form.email.value;
+  const password = form.password.value;
+  const errorEl = document.getElementById('loginError');
+  const submitButton = form.querySelector('.login-submit');
+  const submitLabel = submitButton?.querySelector('.login-submit-label');
+  if (submitButton) submitButton.disabled = true;
+  if (submitLabel) submitLabel.textContent = 'Signing in…';
+  try {
+    const response = await fetch('/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password })
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || 'Sign in failed');
+    setSession(data.token, data.user);
+    showLogin(false);
+    state.currentView = 'exceptions';
+    refreshChrome();
+    await loadInvoices();
+    showToast(`Signed in as ${data.user.name}`, 'success');
+  } catch (error) {
+    if (submitButton) submitButton.disabled = false;
+    if (submitLabel) submitLabel.textContent = 'Continue';
+    if (errorEl) {
+      errorEl.hidden = false;
+      errorEl.textContent = error.message;
     }
   }
 });
 
-// Load invoices
-loadInvoices();
-
-// Initialize integrations
-async function initializeIntegrations() {
-  try {
-    // Initialize Uppy service
-    uppyService.setupDragDrop('#uppyZone');
-    
-    // Initialize real-time service
-    await realtimeService.connect();
-    
-    // Subscribe to real-time events
-    realtimeService.on('invoice:uploaded', async (data) => {
-      await loadInvoices();
-      showToast(`New invoice uploaded: ${data.vendorName}`, 'success');
-    });
-
-    realtimeService.on('invoice:approved', async (data) => {
-      await loadInvoices();
-      showToast(`Invoice approved: ${data.vendorName}`, 'success');
-    });
-
-    console.log('Integrations initialized successfully');
-  } catch (error) {
-    console.warn('Integration initialization failed (continuing with fallback):', error);
-    // App continues even if real-time or Uppy fails
+document.getElementById('profilePill')?.addEventListener('click', (event) => {
+  event.stopPropagation();
+  if (!getUser()) {
+    showLogin(true);
+    return;
   }
-}
+  const menu = document.getElementById('accountMenu');
+  const open = menu.classList.toggle('open');
+  document.getElementById('profilePill').setAttribute('aria-expanded', String(open));
+  document.getElementById('noticePanel')?.classList.remove('open');
+});
 
-// Initialize integrations after a short delay
-setTimeout(initializeIntegrations, 1000);
+document.getElementById('accountMenu')?.addEventListener('click', async (event) => {
+  event.stopPropagation();
+  const demoEmail = event.target.closest('[data-demo-email]')?.dataset.demoEmail;
+  if (demoEmail) {
+    const response = await fetch('/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: demoEmail, password: 'demo123' })
+    });
+    const data = await response.json();
+    if (!response.ok) return showToast(data.error || 'Switch failed', 'error');
+    setSession(data.token, data.user);
+    document.getElementById('accountMenu')?.classList.remove('open');
+    refreshChrome();
+    await loadInvoices();
+    showToast(`Now acting as ${data.user.name}`, 'success');
+    return;
+  }
+  if (event.target.closest('#signOutButton')) {
+    clearSession();
+    document.getElementById('accountMenu')?.classList.remove('open');
+    document.getElementById('profilePill')?.setAttribute('aria-expanded', 'false');
+    showLogin(true);
+    showToast('Signed out', 'info');
+  }
+});
 
-// Show onboarding on first visit
-if (state.showOnboarding && state.invoices.length === 0) {
-  setTimeout(() => {
-    showToast('Welcome to Invoice Intelligence Hub! Upload an invoice to get started. Press U for upload anytime.', 'info');
-    localStorage.setItem('onboarded', 'true');
-    state.showOnboarding = false;
-  }, 500);
-}
+document.getElementById('noticeToggle')?.addEventListener('click', (event) => {
+  event.stopPropagation();
+  const panel = document.getElementById('noticePanel');
+  panel.hidden = false;
+  panel.classList.toggle('open');
+  document.getElementById('accountMenu')?.classList.remove('open');
+});
+
+document.getElementById('reportsButton')?.addEventListener('click', () => {
+  state.currentView = 'exports';
+  renderView();
+});
+
+document.getElementById('togglePassword')?.addEventListener('click', () => {
+  const input = document.getElementById('loginPassword');
+  const hidden = input.type === 'password';
+  input.type = hidden ? 'text' : 'password';
+  document.getElementById('togglePassword').textContent = hidden ? 'Hide' : 'Show';
+});
+
+document.querySelectorAll('.role-chip').forEach((chip) => {
+  chip.addEventListener('click', () => {
+    document.getElementById('loginEmail').value = chip.dataset.email;
+    document.querySelectorAll('.role-chip').forEach((item) => item.setAttribute('aria-pressed', String(item === chip)));
+    document.getElementById('loginPassword').focus();
+  });
+});
+
+document.addEventListener('click', () => {
+  document.getElementById('accountMenu')?.classList.remove('open');
+  document.getElementById('noticePanel')?.classList.remove('open');
+});
+
+document.getElementById('globalSearch')?.addEventListener('input', (event) => {
+  state.searchQuery = event.target.value;
+  state.currentView = 'invoices';
+  renderView();
+});
+
+const loginForm = document.getElementById('loginForm');
+loginForm?.addEventListener('keydown', (event) => {
+  if (event.key !== 'Tab') return;
+  const focusable = [...loginForm.querySelectorAll('input, button')].filter((el) => !el.disabled);
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
+  }
+});
+
+window.addEventListener('easyme:unauthorized', () => showLogin(true));
+window.addEventListener('easyme:navigate', () => renderView());
+
+bootstrapSession();

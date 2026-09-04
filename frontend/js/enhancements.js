@@ -1,17 +1,18 @@
 // Enhanced UI Features for Invoice Intelligence Hub
 
 export function setupThemeToggle(toggleElement) {
-  const savedTheme = localStorage.getItem('theme') || 'light';
+  const savedTheme = localStorage.getItem('darkMode') === 'true'
+    ? 'dark'
+    : localStorage.getItem('theme') || 'light';
   const isDark = savedTheme === 'dark';
-  
-  if (isDark) {
-    document.body.classList.add('dark-mode');
-    toggleElement.textContent = '☀️';
-  }
+
+  document.body.classList.toggle('dark-mode', isDark);
+  toggleElement.textContent = isDark ? '☀️' : '🌙';
   
   toggleElement.addEventListener('click', () => {
     const isDarkMode = document.body.classList.toggle('dark-mode');
     toggleElement.textContent = isDarkMode ? '☀️' : '🌙';
+    localStorage.setItem('darkMode', String(isDarkMode));
     localStorage.setItem('theme', isDarkMode ? 'dark' : 'light');
   });
 }

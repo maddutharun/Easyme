@@ -1,7 +1,14 @@
 const redisUrl = process.env.REDIS_URL;
-  const invoiceQueue = redisUrl
-    ? new (require('bullmq').Queue)('invoice-processing', { connection: { url: redisUrl } })
-    : null;
+let invoiceQueue = null;
+
+if (redisUrl) {
+  try {
+    const { Queue } = require('bullmq');
+    invoiceQueue = new Queue('invoice-processing', { connection: { url: redisUrl } });
+  } catch (error) {
+    console.warn('[queue] Redis is configured but bullmq is not installed; using in-process queue.');
+  }
+}
 
 const enqueueInvoice = async (invoiceId, fileHash) => {
   if (!invoiceQueue) return { queued: false, mode: 'local', invoiceId };

@@ -15,8 +15,6 @@
     "node": ">=18"
   },
   "dependencies": {
-    "@tanstack/react-query": "^5.102.8",
-    "canvas": "^3.2.3",
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
     "express": "4.21.2",

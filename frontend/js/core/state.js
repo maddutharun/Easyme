@@ -1,7 +1,7 @@
 export const state = {
   invoices: [],
   selectedInvoiceId: null,
-  currentView: 'upload',
+  currentView: 'exceptions',
   activeFile: null,
   exportType: 'json',
   searchQuery: '',
@@ -10,6 +10,9 @@ export const state = {
   history: [],
   redoStack: [],
   sidebarCollapsed: false,
-  darkMode: localStorage.getItem('darkMode') === 'true',
-  showOnboarding: localStorage.getItem('onboarded') !== 'true'
+  darkMode: localStorage.getItem('darkMode') === 'true' || localStorage.getItem('theme') === 'dark',
+  showOnboarding: localStorage.getItem('onboarded') !== 'true',
+  user: null,
+  metrics: { total: 0, posted: 0, exceptions: 0 },
+  audit: []
 };
