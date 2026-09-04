@@ -1,38 +1,19 @@
 version: '3.9'
 
 services:
-  postgres:
-    image: pgvector/pgvector:pg16
-    environment:
-      POSTGRES_DB: ap_erp
-      POSTGRES_USER: ap_user
-      POSTGRES_PASSWORD: ap_password
-    ports:
-      - '5432:5432'
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-  redis:
-    image: redis:7
-    ports:
-      - '6379:6379'
   app:
     build: .
     container_name: invoice-intelligence-hub
-    depends_on:
-      - postgres
-      - redis
     ports:
       - '3000:3000'
     environment:
       NODE_ENV: production
       PORT: 3000
       AUTH_REQUIRED: 'true'
+      JWT_SECRET: change-me-in-production
       ERP_MODE: demo
       STORAGE_PATH: /app/uploads
-      DATABASE_URL: postgresql://ap_user:ap_password@postgres:5432/ap_erp
-      REDIS_URL: redis://redis:6379
+      DB_PATH: /app/data/app.db
     volumes:
       - ./uploads:/app/uploads
-
-volumes:
-  pgdata:
+      - ./backend/data:/app/backend/data

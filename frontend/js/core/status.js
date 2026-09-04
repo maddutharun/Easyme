@@ -1,14 +1,13 @@
 export function getStatusClass(status) {
-  const normalized = String(status || '').toLowerCase();
-  if (normalized.includes('parsed') || normalized.includes('posted') || normalized.includes('ready')) return 'parsed';
-  if (normalized.includes('pending') || normalized.includes('review') || normalized.includes('query')) return 'pending';
-  if (normalized.includes('failed') || normalized.includes('on hold') || normalized.includes('reject')) return 'failed';
+  const normalized = String(status || '').toLowerCase().replaceAll(' ', '_');
+  if (['posted', 'ready_to_post', 'approved', 'auto-posted', 'auto_posted'].includes(normalized) || normalized.includes('posted') || normalized.includes('ready')) return 'parsed';
+  if (['rejected', 'posting_failed', 'on_hold', 'failed', 'likely_reject'].includes(normalized) || normalized.includes('fail') || normalized.includes('reject') || normalized.includes('hold')) return 'failed';
   return 'pending';
 }
 
 export function humanizeStatus(status) {
-  if (!status) return 'Pending';
-  const value = String(status).replaceAll('_', ' ');
+  if (!status) return 'Pending review';
+  const value = String(status).replaceAll('_', ' ').replaceAll('-', ' ');
   return value.charAt(0).toUpperCase() + value.slice(1);
 }
 

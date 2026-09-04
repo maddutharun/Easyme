@@ -6,6 +6,7 @@ import { showToast } from './core/toast.js';
 import { renderDashboardPage as renderDashboardModule } from './pages/dashboard.js';
 import { renderExportsPage as renderExportsModule } from './pages/exports.js';
 import { renderWorkflowPage as renderWorkflowModule } from './pages/workflow.js';
+import { renderExceptionsPage } from './pages/exceptions.js';
 import {
   setupThemeToggle,
   showToastNotification,
@@ -15,8 +16,7 @@ import {
   initExportPreview,
   addStatusBadgeAnimations
 } from './enhancements.js';
-import { uppyService } from './integrations/uppy-service.js';
-import { realtimeService } from './integrations/realtime-service.js';
+import { apiFetch, getToken, getUser, setSession, clearSession, canPerform } from './core/api.js';
 
 const appView = document.getElementById('appView');
 
@@ -98,9 +98,19 @@ function setupKeyboardShortcuts() {
 
 async function loadInvoices() {
   try {
-    const response = await fetch('/api/summary');
-    const summary = await response.json();
+    const [summaryResponse, auditResponse, metricsResponse] = await Promise.all([
+      apiFetch('/api/summary'),
+      apiFetch('/api/audit'),
+      apiFetch('/api/metrics')
+    ]);
+    if (summaryResponse.status === 401) return;
+    const summary = await summaryResponse.json();
+    const auditPayload = auditResponse.ok ? await auditResponse.json() : { audit: [] };
+    const metricsPayload = metricsResponse.ok ? await metricsResponse.json() : { metrics: {} };
     state.invoices = [...(summary.invoices || [])].sort((a, b) => new Date(b.date || '1970-01-01') - new Date(a.date || '1970-01-01'));
+    state.audit = auditPayload.audit || [];
+    state.metrics = metricsPayload.metrics || summary.metrics || {};
+    refreshChrome();
     if (!state.selectedInvoiceId && state.invoices.length) state.selectedInvoiceId = state.invoices[0].id;
     renderView();
   } catch (error) {
@@ -239,6 +249,7 @@ function renderUploadPage() {
     try {
       const response = await fetchWithTimeout('/api/invoices/upload', {
         method: 'POST',
+        headers: getToken() ? { Authorization: `Bearer ${getToken()}` } : {},
         body: formData
       }, 25000);
 
@@ -386,7 +397,9 @@ function renderInvoiceDetailPage(invoice) {
         <div class="detail-actions">
           <span class="status-badge ${statusClass} ${statusText.toLowerCase().includes('pending') ? 'pending' : ''}">${humanizeStatus(statusText)}</span>
           <button class="secondary-button" id="editInvoiceButton">Edit</button>
-          <button class="primary-button" id="approveInvoiceButton">Approve & Post</button>
+          ${canPerform('hold') ? '<button class="secondary-button" id="holdInvoiceButton">Hold</button>' : ''}
+          ${canPerform('reject') ? '<button class="secondary-button" id="rejectInvoiceButton">Reject</button>' : ''}
+          ${canPerform('approve') ? `<button class="primary-button" id="approveInvoiceButton">${canPerform('post') ? 'Approve & Post' : 'Approve'}</button>` : ''}
           <button class="ghost-button" id="exportInvoiceButton">Export</button>
         </div>
       </div>
@@ -420,6 +433,13 @@ function renderInvoiceDetailPage(invoice) {
           <strong>${currencyFormatter(invoice.amount || 0)}</strong>
         </div>
       </div>
+
+      ${invoice.storagePath || invoice.fileName ? `
+        <div class="section-card animate-slideUp" style="margin-top: 22px;">
+          <h3 style="margin: 0 0 12px 0; color: var(--heading);">Source document</h3>
+          <iframe class="document-preview" title="Invoice document" src="about:blank"></iframe>
+        </div>
+      ` : ''}
 
       <div class="section-card animate-slideUp" style="margin-top: 22px; animation-delay: 0.1s;">
         <h3 style="margin: 0 0 18px 0; color: var(--heading);">📋 Extracted Details</h3>
@@ -524,9 +544,8 @@ function renderInvoiceDetailPage(invoice) {
     });
 
     try {
-      const response = await fetch(`/api/invoices/${invoice.id}`, {
+      const response = await apiFetch(`/api/invoices/${invoice.id}`, {
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
       });
       const data = await response.json();
@@ -545,17 +564,26 @@ function renderInvoiceDetailPage(invoice) {
 
   document.getElementById('approveInvoiceButton')?.addEventListener('click', async () => {
     try {
-      const response = await fetch(`/api/invoices/${invoice.id}/action`, {
+      const response = await apiFetch(`/api/invoices/${invoice.id}/action`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'approve' })
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data?.error || 'Approval failed');
-      const index = state.invoices.findIndex((item) => item.id === data.invoice.id);
-      if (index >= 0) state.invoices[index] = data.invoice;
-      renderInvoiceDetailPage(data.invoice);
-      showToast('Invoice approved and ready for posting', 'success');
+      let updated = data.invoice;
+      if (canPerform('post')) {
+        const postResponse = await apiFetch(`/api/invoices/${invoice.id}/action`, {
+          method: 'POST',
+          body: JSON.stringify({ action: 'post' })
+        });
+        const posted = await postResponse.json();
+        if (!postResponse.ok) throw new Error(posted?.error || 'Posting failed');
+        updated = posted.invoice;
+      }
+      const index = state.invoices.findIndex((item) => item.id === updated.id);
+      if (index >= 0) state.invoices[index] = updated;
+      renderInvoiceDetailPage(updated);
+      showToast(canPerform('post') ? 'Invoice approved and posted' : 'Invoice approved and ready for posting', 'success');
     } catch (error) {
       showToast(error?.message || 'Approval could not be completed', 'error');
     }
@@ -580,10 +608,31 @@ function renderInvoiceDetailPage(invoice) {
     });
   });
 
+  document.getElementById('holdInvoiceButton')?.addEventListener('click', async () => {
+    const response = await apiFetch(`/api/invoices/${invoice.id}/action`, { method: 'POST', body: JSON.stringify({ action: 'hold' }) });
+    const data = await response.json();
+    if (!response.ok) return showToast(data.error || 'Hold failed', 'error');
+    renderInvoiceDetailPage(data.invoice);
+  });
+  document.getElementById('rejectInvoiceButton')?.addEventListener('click', async () => {
+    const response = await apiFetch(`/api/invoices/${invoice.id}/action`, { method: 'POST', body: JSON.stringify({ action: 'reject', reason: 'Rejected from review workspace' }) });
+    const data = await response.json();
+    if (!response.ok) return showToast(data.error || 'Reject failed', 'error');
+    renderInvoiceDetailPage(data.invoice);
+  });
   document.getElementById('editInvoiceButton')?.addEventListener('click', () => {
     const firstField = document.querySelector('[data-edit-field]');
     firstField?.focus();
   });
+
+  if (invoice.storagePath || invoice.fileName) {
+    apiFetch(`/api/invoices/${invoice.id}/file`).then(async (response) => {
+      if (!response.ok) return;
+      const blob = await response.blob();
+      const frame = document.querySelector('.document-preview');
+      if (frame) frame.src = URL.createObjectURL(blob);
+    }).catch(() => {});
+  }
 }
 
 function getFilteredInvoices() {
@@ -606,21 +655,20 @@ function toggleInvoiceSelection(invoiceId) {
   renderInvoicesPage();
 }
 
-function applyBulkAction(action) {
+async function applyBulkAction(action) {
   if (!state.bulkSelectedIds.length) return;
-
-  const selected = state.invoices.filter((invoice) => state.bulkSelectedIds.includes(invoice.id));
-  pushHistory();
-
-  selected.forEach((invoice) => {
-    if (action === 'approve') invoice.status = 'Auto-posted';
-    if (action === 'reject') invoice.status = 'Query open';
-    if (action === 'hold') invoice.status = 'On hold';
-  });
-
+  const mapped = action === 'approve' ? 'approve' : action;
+  for (const id of state.bulkSelectedIds) {
+    const response = await apiFetch(`/api/invoices/${id}/action`, { method: 'POST', body: JSON.stringify({ action: mapped }) });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      showToast(data.error || 'Bulk update failed', 'error');
+      return;
+    }
+  }
   state.bulkSelectedIds = [];
-  showToast(`${selected.length} invoice(s) updated`, 'success');
-  renderView();
+  await loadInvoices();
+  showToast('Selected invoices updated', 'success');
 }
 
 function renderInvoicesPage() {
@@ -1169,6 +1217,9 @@ function renderView() {
     case 'exports':
       renderExportsModule({ appView, state, renderBreadcrumbBar });
       break;
+    case 'exceptions':
+      renderExceptionsPage({ appView, state, renderBreadcrumbBar, formatMoney });
+      break;
     case 'dashboard':
       renderDashboardModule({ appView, state, renderBreadcrumbBar, formatMoney, getStatusClass, humanizeStatus });
       break;
@@ -1290,44 +1341,89 @@ document.addEventListener('click', (e) => {
   }
 });
 
-// Load invoices
-loadInvoices();
+function refreshChrome() {
+  const user = getUser();
+  state.user = user;
+  const name = document.getElementById('profileName');
+  const role = document.getElementById('profileRole');
+  const avatar = document.getElementById('profileAvatar');
+  const queue = document.getElementById('queueCount');
+  if (name) name.textContent = user?.name || 'Sign in';
+  if (role) role.textContent = user?.role?.replaceAll('_', ' ') || 'Restricted';
+  if (avatar) avatar.textContent = (user?.name || 'EM').split(' ').map((part) => part[0]).join('').slice(0, 2).toUpperCase();
+  if (queue) queue.textContent = `${state.metrics?.exceptions || 0} items`;
+}
+
+function showLogin(visible) {
+  document.getElementById('loginGate')?.classList.toggle('hidden', !visible);
+}
+
+async function bootstrapSession() {
+  if (!getToken()) {
+    showLogin(true);
+    return;
+  }
+  const me = await apiFetch('/api/auth/me');
+  if (!me.ok) {
+    clearSession();
+    showLogin(true);
+    return;
+  }
+  const payload = await me.json();
+  state.user = payload.user;
+  showLogin(false);
+  refreshChrome();
+  await loadInvoices();
+}
 
 // Initialize integrations
 async function initializeIntegrations() {
+  return;
+}
+
+document.getElementById('loginForm')?.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const email = form.email.value;
+  const password = form.password.value;
+  const errorEl = document.getElementById('loginError');
   try {
-    // Initialize Uppy service
-    uppyService.setupDragDrop('#uppyZone');
-    
-    // Initialize real-time service
-    await realtimeService.connect();
-    
-    // Subscribe to real-time events
-    realtimeService.on('invoice:uploaded', async (data) => {
-      await loadInvoices();
-      showToast(`New invoice uploaded: ${data.vendorName}`, 'success');
+    const response = await fetch('/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password })
     });
-
-    realtimeService.on('invoice:approved', async (data) => {
-      await loadInvoices();
-      showToast(`Invoice approved: ${data.vendorName}`, 'success');
-    });
-
-    console.log('Integrations initialized successfully');
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || 'Sign in failed');
+    setSession(data.token, data.user);
+    showLogin(false);
+    refreshChrome();
+    await loadInvoices();
   } catch (error) {
-    console.warn('Integration initialization failed (continuing with fallback):', error);
-    // App continues even if real-time or Uppy fails
+    if (errorEl) {
+      errorEl.hidden = false;
+      errorEl.textContent = error.message;
+    }
   }
-}
+});
 
-// Initialize integrations after a short delay
-setTimeout(initializeIntegrations, 1000);
+document.getElementById('profilePill')?.addEventListener('click', () => {
+  if (!getUser()) {
+    showLogin(true);
+    return;
+  }
+  clearSession();
+  showLogin(true);
+  showToast('Signed out', 'info');
+});
 
-// Show onboarding on first visit
-if (state.showOnboarding && state.invoices.length === 0) {
-  setTimeout(() => {
-    showToast('Welcome to Invoice Intelligence Hub! Upload an invoice to get started. Press U for upload anytime.', 'info');
-    localStorage.setItem('onboarded', 'true');
-    state.showOnboarding = false;
-  }, 500);
-}
+document.querySelector('.search-wrap input')?.addEventListener('input', (event) => {
+  state.searchQuery = event.target.value;
+  state.currentView = 'invoices';
+  renderView();
+});
+
+window.addEventListener('easyme:unauthorized', () => showLogin(true));
+window.addEventListener('easyme:navigate', () => renderView());
+
+bootstrapSession();

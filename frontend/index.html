@@ -28,15 +28,16 @@
           <button class="nav-item" data-view="dashboard">Dashboard</button>
           <button class="nav-item active" data-view="upload">Upload</button>
           <button class="nav-item" data-view="invoices">Invoices</button>
+          <button class="nav-item" data-view="exceptions">Exceptions</button>
           <button class="nav-item" data-view="workflow">Workflow</button>
           <button class="nav-item" data-view="exports">Exports</button>
         </nav>
 
         <div class="sidebar-footer">
-          <div class="mini-badge">Live Ops</div>
+          <div class="mini-badge">Live ops</div>
           <div class="mini-metric">
-            <span>Approval queue</span>
-            <strong>12 items</strong>
+            <span>Exception queue</span>
+            <strong id="queueCount">0 items</strong>
           </div>
         </div>
       </aside>
@@ -53,11 +54,11 @@
             <button class="icon-btn" aria-label="Notifications">🔔</button>
             <button class="icon-btn" aria-label="Reports">📊</button>
             <button class="theme-toggle-btn" id="themeToggle" aria-label="Toggle dark mode" title="Toggle dark mode">🌙</button>
-            <div class="profile-pill">
-              <div class="profile-avatar">AR</div>
+            <div class="profile-pill" id="profilePill">
+              <div class="profile-avatar" id="profileAvatar">—</div>
               <div class="profile-meta">
-                <span class="profile-name">Ari R.</span>
-                <span class="profile-role">Finance Ops</span>
+                <span class="profile-name" id="profileName">Sign in</span>
+                <span class="profile-role" id="profileRole">Restricted</span>
               </div>
             </div>
           </div>
@@ -65,6 +66,18 @@
 
         <div id="appView" class="app-view"></div>
         <div id="toastContainer" class="toast-container"></div>
+        <div id="loginGate" class="login-gate hidden" role="dialog" aria-modal="true" aria-labelledby="loginTitle">
+          <form id="loginForm" class="login-card">
+            <div class="brand-title">EasyMe</div>
+            <h1 id="loginTitle">Sign in to Invoice Studio</h1>
+            <p>Role-based access for extraction, exception review, and ERP posting.</p>
+            <label>Email<input name="email" type="email" value="finance@easyme.local" autocomplete="username" required /></label>
+            <label>Password<input name="password" type="password" value="demo123" autocomplete="current-password" required /></label>
+            <button class="primary-button" type="submit">Continue</button>
+            <p class="login-hint">Demo: finance@easyme.local / demo123 (full posting). Clerk can review but cannot post.</p>
+            <div id="loginError" class="upload-status error" hidden></div>
+          </form>
+        </div>
       </main>
     </div>
 

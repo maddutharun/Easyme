@@ -1,5 +1,6 @@
 const express = require('express');
 const router = express.Router();
+// Canonical vendor APIs live in backend/app.js. This router is kept for compatibility tests only.
 const { vendors, transactions } = require('../backend/data/seed');
 
 router.get('/', (req, res) => {

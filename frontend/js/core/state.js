@@ -11,5 +11,8 @@ export const state = {
   redoStack: [],
   sidebarCollapsed: false,
   darkMode: localStorage.getItem('darkMode') === 'true',
-  showOnboarding: localStorage.getItem('onboarded') !== 'true'
+  showOnboarding: localStorage.getItem('onboarded') !== 'true',
+  user: null,
+  metrics: { total: 0, posted: 0, exceptions: 0 },
+  audit: []
 };

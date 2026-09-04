@@ -95,7 +95,7 @@ const invoices = [
     receipt: 'GR-88021',
     quantity: 120,
     tax: 0,
-    status: 'Auto-posted',
+    status: 'posted',
     confidence: 96.4,
     issue: 'Matched PO, receipt, and vendor master'
   },
@@ -127,7 +127,7 @@ const invoices = [
     receipt: 'GR-99101',
     quantity: 12,
     tax: 1811.52,
-    status: 'On hold',
+    status: 'on_hold',
     confidence: 74.8,
     issue: 'GST total needs India compliance review'
   }

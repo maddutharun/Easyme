@@ -7,12 +7,12 @@ const cors = require('cors');
 const helmet = require('helmet');
 const { extractInvoiceData, reconcileInvoiceAgainstErp, generateRecommendation } = require('./services/invoice-engine');
 const { vendors, transactions, invoices: seedInvoices } = require('./data/seed');
-const { createJsonStore } = require('./storage/json-store');
 const { createErpAdapter } = require('./services/erp-adapter');
 const { matchingPolicy, uploadPolicy, allowedInvoiceMimeTypes, allowedInvoiceExtensions } = require('./config/app-config');
-const { PORT, AUTH_REQUIRED, STORAGE_PATH } = require('./config/env');
-const { initializeDatabase } = require('./services/database.service');
+const { PORT, AUTH_REQUIRED, STORAGE_PATH, NODE_ENV } = require('./config/env');
+const { initializeDatabase, createPersistentStore } = require('./services/database.service');
 const { authenticate, signToken, requireAuth, requireRole } = require('./services/auth.service');
+const { decorateInvoice, isException, isPosted, isReview, STATUSES, normalizeStatus } = require('./src/status');
 const { invoiceQueue } = require('./services/queue.service');
 const { reconcilePostedInvoice } = require('./src/services/reconciliation.service');
 const { recordFeedback } = require('./src/services/feedback.service');
@@ -29,7 +29,7 @@ const app = express();
 const frontendDir = path.join(__dirname, '..', 'frontend');
 const uploadDir = STORAGE_PATH || path.join(__dirname, '..', 'uploads');
 fs.mkdirSync(uploadDir, { recursive: true });
-const store = createJsonStore(path.join(__dirname, 'data'), seedInvoices);
+const store = createPersistentStore(seedInvoices);
 const invoices = store.invoices;
 const audit = store.audit;
 
@@ -55,12 +55,28 @@ const rateLimiter = (req, res, next) => {
   return next();
 };
 
-app.use(helmet({ contentSecurityPolicy: false, crossOriginResourcePolicy: false }));
-app.use(cors({ origin: true, credentials: true }));
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'"],
+      styleSrc: ["'self'", "'unsafe-inline'"],
+      imgSrc: ["'self'", 'data:', 'blob:'],
+      connectSrc: ["'self'"],
+      fontSrc: ["'self'", 'data:'],
+      objectSrc: ["'none'"],
+      frameSrc: ["'self'", 'blob:'],
+    }
+  },
+  crossOriginResourcePolicy: { policy: 'same-origin' }
+}));
+app.use(cors({ origin: NODE_ENV === 'production' ? false : true, credentials: true }));
 app.use(rateLimiter);
 app.use(express.json({ limit: '2mb' }));
 
-initializeDatabase().catch((error) => console.warn('[db] Could not initialize SQLite:', error.message));
+const ready = initializeDatabase(seedInvoices).catch((error) => {
+  console.warn('[db] Could not initialize SQLite:', error.message);
+});
 
 const isAllowedInvoiceFile = (file) => {
   const normalizedMime = (file.mimetype || '').toLowerCase();
@@ -104,17 +120,17 @@ function decideRouting(comparison, extracted, duplicateFile) {
   const needsReview = score < 98 && score >= 80;
   const likelyReject = score < 80;
 
-  let routeStatus = 'ready_to_post';
+  let routeStatus = STATUSES.READY_TO_POST;
   let routeLabel = 'Ready to post';
 
   if (duplicateFile || hardGate) {
-    routeStatus = 'pending_review';
+    routeStatus = STATUSES.PENDING_REVIEW;
     routeLabel = 'Pending review';
   } else if (likelyReject) {
-    routeStatus = 'likely_reject';
-    routeLabel = 'Likely reject';
+    routeStatus = STATUSES.REJECTED;
+    routeLabel = 'Rejected';
   } else if (needsReview) {
-    routeStatus = 'pending_review';
+    routeStatus = STATUSES.PENDING_REVIEW;
     routeLabel = 'Pending review';
   }
 
@@ -170,12 +186,40 @@ function buildWorkflowSummary(invoice, routing = {}) {
 
 function decorateInvoiceWorkflow(invoice) {
   if (!invoice) return invoice;
+  const normalized = decorateInvoice(invoice);
   const defaultRouting = {
-    requiresHumanReview: invoice.status && invoice.status !== 'ready_to_post' && invoice.status !== 'posted',
-    label: invoice.status === 'posted' ? 'Posted to ERP' : invoice.status === 'ready_to_post' ? 'Ready to post' : 'Reviewer attention required'
+    requiresHumanReview: ![STATUSES.READY_TO_POST, STATUSES.POSTED, STATUSES.APPROVED].includes(normalized.status),
+    label: normalized.status === STATUSES.POSTED ? 'Posted to ERP' : normalized.status === STATUSES.READY_TO_POST ? 'Ready to post' : 'Reviewer attention required'
   };
-  const workflow = invoice.workflow || buildWorkflowSummary(invoice, defaultRouting);
-  return { ...invoice, workflow };
+  const workflow = invoice.workflow || buildWorkflowSummary(normalized, defaultRouting);
+  return { ...normalized, workflow };
+}
+
+function actorFrom(req) {
+  return req.user?.name || req.user?.email || req.user?.sub || 'system';
+}
+
+function metricsSnapshot() {
+  const decorated = invoices.map((invoice) => decorateInvoice(invoice));
+  const total = decorated.length;
+  const posted = decorated.filter((invoice) => isPosted(invoice.status)).length;
+  const review = decorated.filter((invoice) => isReview(invoice.status)).length;
+  const exceptions = decorated.filter((invoice) => isException(invoice.status)).length;
+  const rejected = decorated.filter((invoice) => invoice.status === STATUSES.REJECTED).length;
+  const hold = decorated.filter((invoice) => invoice.status === STATUSES.ON_HOLD).length;
+  const readyToPost = decorated.filter((invoice) => invoice.status === STATUSES.READY_TO_POST || invoice.status === STATUSES.APPROVED).length;
+  return {
+    total,
+    posted,
+    review,
+    exceptions,
+    rejected,
+    hold,
+    readyToPost,
+    queries: decorated.filter((invoice) => invoice.status === STATUSES.QUERY_OPEN).length,
+    averageConfidence: total ? Number((decorated.reduce((sum, invoice) => sum + Number(invoice.confidence || 0), 0) / total).toFixed(2)) : 0,
+    totalVolume: decorated.reduce((sum, invoice) => sum + Number(invoice.amount || 0), 0)
+  };
 }
 
 app.use(express.static(frontendDir));
@@ -197,28 +241,27 @@ app.get('/api/auth/me', requireAuth, (req, res) => {
   res.json({ user: req.user });
 });
 
-const vendorRoutes = require('../routes/vendor.routes');
-app.use('/api/vendors', vendorRoutes);
+app.get('/api/config', (req, res) => res.json({
+  matchingPolicy,
+  supportedUploadTypes: uploadPolicy.supportedTypes,
+  maxUploadSizeMb: uploadPolicy.maxSizeMb,
+  authRequired: AUTH_REQUIRED,
+  demoUsers: [
+    { email: 'finance@easyme.local', role: 'finance_approver' },
+    { email: 'manager@easyme.local', role: 'ap_manager' },
+    { email: 'clerk@easyme.local', role: 'ap_clerk' }
+  ]
+}));
 
-app.get('/api/config', (req, res) => res.json({ matchingPolicy, supportedUploadTypes: uploadPolicy.supportedTypes, maxUploadSizeMb: uploadPolicy.maxSizeMb }));
-
-app.get('/api/summary', (req, res) => {
-  const posted = invoices.filter((invoice) => invoice.status === 'Auto-posted' || invoice.status === 'posted' || invoice.status === 'ready_to_post').length;
-  const review = invoices.filter((invoice) => invoice.status === 'Needs review' || invoice.status === 'pending_review' || invoice.status === 'pending_vendor_correction').length;
-  const queries = invoices.filter((invoice) => invoice.status === 'Query open' || invoice.status === 'likely_reject').length;
-  const readyToPost = invoices.filter((invoice) => invoice.status === 'ready_to_post').length;
+app.get('/api/summary', requireAuth, (req, res) => {
+  const metrics = metricsSnapshot();
   res.json({
     invoices: invoices.map((invoice) => decorateInvoiceWorkflow(invoice)),
     vendors,
     transactions,
     metrics: {
-      total: invoices.length,
-      posted,
-      review,
-      queries,
-      readyToPost,
-      volume: formatMoney(invoices.reduce((sum, item) => sum + Number(item.amount || 0), 0)),
-      rejected: invoices.filter((invoice) => ['rejected', 'likely_reject'].includes(invoice.status)).length
+      ...metrics,
+      volume: formatMoney(metrics.totalVolume)
     }
   });
 });
@@ -260,7 +303,7 @@ app.get('/api/observability', (req, res) => {
   });
 });
 
-app.get('/api/workflow', (req, res) => {
+app.get('/api/workflow', requireAuth, (req, res) => {
   const items = invoices.map((invoice) => ({
     id: invoice.id,
     vendor: invoice.vendor,
@@ -270,28 +313,39 @@ app.get('/api/workflow', (req, res) => {
   res.json({ workflow: items });
 });
 
-app.get('/api/workflow/:id', (req, res) => {
+app.get('/api/workflow/:id', requireAuth, (req, res) => {
   const invoice = invoices.find((item) => item.id === req.params.id);
   if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
   const decorated = decorateInvoiceWorkflow(invoice);
   res.json({ invoice: decorated, workflow: decorated.workflow });
 });
 
-app.get('/api/vendors', (req, res) => {
+app.get('/api/vendors', requireAuth, (req, res) => {
   res.json({ vendors, transactions, total: vendors.length });
 });
 
-app.get('/api/audit', (req, res) => {
+app.get('/api/audit', requireAuth, (req, res) => {
   res.json({ audit: audit.slice(-50).reverse(), total: audit.length });
 });
 
-app.get('/api/invoices', (req, res) => {
+app.get('/api/invoices', requireAuth, (req, res) => {
   const query = String(req.query.search || '').toLowerCase();
-  const result = invoices.filter((invoice) => !query || `${invoice.id} ${invoice.invoiceNumber} ${invoice.vendor} ${invoice.po || ''}`.toLowerCase().includes(query));
+  const result = invoices
+    .map((invoice) => decorateInvoice(invoice))
+    .filter((invoice) => !query || `${invoice.id} ${invoice.invoiceNumber} ${invoice.vendor} ${invoice.po || ''}`.toLowerCase().includes(query));
   res.json({ invoices: result, total: result.length });
 });
 
-app.get('/api/health', (req, res) => res.json({ status: 'ok', erp: 'connected', storage: 'local-json', mode: AUTH_REQUIRED ? 'secured' : 'demo', checkedAt: new Date().toISOString() }));
+app.get('/api/health', async (req, res) => {
+  const erpHealth = await erp.ping().catch(() => ({ ok: false }));
+  res.json({
+    status: 'ok',
+    erp: erpHealth.ok ? 'connected' : 'degraded',
+    storage: 'sqlite',
+    mode: AUTH_REQUIRED ? 'secured' : 'demo',
+    checkedAt: new Date().toISOString()
+  });
+});
 
 app.get('/api/roles', (req, res) => {
   res.json({
@@ -304,32 +358,15 @@ app.get('/api/roles', (req, res) => {
   });
 });
 
-app.get('/api/metrics', (req, res) => {
-  const totalInvoices = invoices.length;
-  const pendingReview = invoices.filter((invoice) => ['pending_review', 'needs_review', 'likely_reject', 'pending_vendor_correction', 'On hold'].includes(invoice.status)).length;
-  const posted = invoices.filter((invoice) => ['posted', 'Auto-posted', 'ready_to_post'].includes(invoice.status)).length;
-  const approvals = invoices.filter((invoice) => invoice.approval && !invoice.approval.required).length;
-  const denied = invoices.filter((invoice) => invoice.status === 'rejected' || invoice.status === 'likely_reject').length;
-
-  res.json({
-    metrics: {
-      totalInvoices,
-      pendingReview,
-      posted,
-      approvals,
-      denied,
-      averageConfidence: totalInvoices ? Number((invoices.reduce((sum, invoice) => sum + Number(invoice.confidence || 0), 0) / totalInvoices).toFixed(2)) : 0,
-      totalVolume: invoices.reduce((sum, invoice) => sum + Number(invoice.amount || 0), 0)
-    },
-    timestamp: new Date().toISOString()
-  });
+app.get('/api/metrics', requireAuth, (req, res) => {
+  res.json({ metrics: metricsSnapshot(), timestamp: new Date().toISOString() });
 });
 
 app.get('/api/queue', (req, res) => {
   res.json({ jobs: invoiceQueue.list() });
 });
 
-app.get('/api/invoices/:id', (req, res) => {
+app.get('/api/invoices/:id', requireAuth, (req, res) => {
   const invoice = invoices.find((item) => item.id === req.params.id);
   if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
   const po = transactions.find((item) => item.po === invoice.po);
@@ -348,10 +385,10 @@ app.post('/api/invoices/:id/review', requireAuth, requireRole('ap_clerk', 'ap_ma
   if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
   const previousStatus = invoice.status;
   Object.assign(invoice, req.body || {});
-  invoice.status = 'pending_review';
+  invoice.status = STATUSES.PENDING_REVIEW;
   invoice.reviewedAt = new Date().toISOString();
   recordAudit('Invoice reviewed', invoice, req.body?.reason || 'Review completed', { previousStatus, actorId: req.user?.sub || 'system', corrections: req.body || {} });
-  res.json({ invoice });
+  res.json({ invoice: decorateInvoice(invoice) });
 });
 
 app.get('/api/invoices/:id/audit', requireAuth, (req, res) => {
@@ -372,13 +409,7 @@ app.get('/api/invoices/:id/reconciliation', requireAuth, async (req, res) => {
   const invoice = invoices.find((item) => item.id === req.params.id);
   if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
   try {
-    const result = await reconcilePostedInvoice(invoice, {
-      getPostedDocument: async (documentNumber) => ({
-        total: invoice.amount,
-        invoiceNumber: invoice.invoiceNumber,
-        documentNumber
-      })
-    });
+    const result = await reconcilePostedInvoice(invoice, erp);
     invoice.reconciliation = result;
     recordAudit('Invoice reconciled', invoice, result.reconciled ? 'ERP values confirmed' : 'ERP discrepancy detected', result);
     res.json(result);
@@ -401,15 +432,11 @@ app.post('/api/feedback', requireAuth, requireRole('ap_manager', 'finance_approv
 });
 
 app.get('/api/dashboard/metrics', requireAuth, (req, res) => {
-  const posted = invoices.filter((invoice) => ['posted', 'POSTED', 'RECONCILED'].includes(invoice.status)).length;
-  const review = invoices.filter((invoice) => ['pending_review', 'PENDING_APPROVAL', 'MATCH_EXCEPTION', 'VALIDATION_FAILED'].includes(invoice.status)).length;
-  const rejected = invoices.filter((invoice) => ['rejected', 'APPROVAL_REJECTED', 'DUPLICATE_BLOCKED'].includes(invoice.status)).length;
-  res.json({ metrics: { total: invoices.length, posted, review, rejected, volume: invoices.reduce((sum, invoice) => sum + Number(invoice.amount || invoice.total || 0), 0) } });
+  res.json({ metrics: metricsSnapshot() });
 });
 
 app.get('/api/exceptions', requireAuth, (req, res) => {
-  const exceptionStatuses = new Set(['pending_review', 'likely_reject', 'pending_vendor_correction', 'On hold', 'MATCH_EXCEPTION', 'VALIDATION_FAILED', 'DUPLICATE_BLOCKED', 'ERP_TIMEOUT', 'POSTING_UNKNOWN', 'RECONCILIATION_FAILED']);
-  const exceptions = invoices.filter((invoice) => exceptionStatuses.has(invoice.status));
+  const exceptions = invoices.map((invoice) => decorateInvoice(invoice)).filter((invoice) => isException(invoice.status));
   res.json({ exceptions, total: exceptions.length });
 });
 
@@ -472,7 +499,7 @@ app.get('/api/pipeline/:id', (req, res) => {
   res.json({ pipeline: invoice.pipeline || { status: invoice.status, stages: [] }, invoice });
 });
 
-app.post('/api/invoices/upload', upload.single('invoice'), async (req, res) => {
+app.post('/api/invoices/upload', requireAuth, upload.single('invoice'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'Upload a PDF, PNG, JPG, or Excel invoice no larger than 10 MB.' });
 
   try {
@@ -525,7 +552,7 @@ app.post('/api/invoices/upload', upload.single('invoice'), async (req, res) => {
   const comparison = reconcileInvoiceAgainstErp(input, { vendors, transactions });
   const routing = decideRouting(comparison, extracted, duplicateFile || duplicateInvoice);
   const aiSummary = buildAiReasoning(comparison, { vendor, po: matchingPo?.po, matchingPo });
-  const status = routing.status === 'ready_to_post' ? 'ready_to_post' : routing.status === 'likely_reject' ? 'likely_reject' : routing.status;
+  const status = routing.status === STATUSES.READY_TO_POST ? STATUSES.READY_TO_POST : routing.status === STATUSES.REJECTED ? STATUSES.REJECTED : routing.status;
 
   const invoice = {
     id: `INV-${Date.now().toString().slice(-8)}`,
@@ -589,7 +616,7 @@ app.post('/api/invoices/upload', upload.single('invoice'), async (req, res) => {
     invoice.totalValid = false;
     invoice.reasoning = [{ rule: 'Document readability', passed: false, message: extracted.extractionIssue, severity: 'critical' }];
     invoice.compliance = { gst: { status: 'review', message: 'No GST data could be read from the uploaded file' }, tds: { section: 'Not required', status: 'not_required', message: 'No invoice data available to assess TDS' }, eInvoice: { status: 'not_required', message: 'No invoice data available to assess e-invoice status' }, hsn: { status: 'missing', message: 'No HSN/SAC data available' } };
-    invoice.status = 'pending_review';
+    invoice.status = STATUSES.PENDING_REVIEW;
     invoice.pipeline.status = 'needs_review';
     invoice.approval.required = true;
   }
@@ -602,7 +629,7 @@ app.post('/api/invoices/upload', upload.single('invoice'), async (req, res) => {
   invoices.unshift(invoice);
   invoiceQueue.enqueue({ id: invoice.id, type: 'invoice-processing', payload: { invoiceId: invoice.id } });
   recordAudit('Invoice analyzed', invoice, isReadable ? `Analyzed ${invoice.fileName}` : `File unreadable: ${invoice.fileName}`, {
-    user: 'ap-analyst',
+    user: actorFrom(req),
     entity: 'invoice',
     reason: isReadable ? 'invoice processed and validated' : 'document unreadable',
     ip: req.ip,
@@ -648,15 +675,13 @@ app.patch('/api/invoices/:id', requireAuth, requireRole('ap_clerk', 'ap_manager'
 
   if (hasManualChanges) {
     invoice.approval = { ...(invoice.approval || {}), required: true, reviewer: null, approvedAt: null, overrideReason: null };
-    invoice.status = 'pending_review';
-    invoice.reviewedAt = new Date().toISOString();
-    invoice.issue = 'Reviewed and corrected by reviewer before approval';
+    invoice.status = STATUSES.PENDING_REVIEW;
     invoice.decision = { ...((invoice.decision || {})), requiresHumanReview: true, label: 'Pending review', status: 'pending_review' };
     invoice.workflow = buildWorkflowSummary(invoice, invoice.decision || { requiresHumanReview: true, label: 'Pending review' });
   }
 
   recordAudit('Invoice reviewed', invoice, `Reviewed invoice ${invoice.invoiceNumber || invoice.id}`, {
-    user: 'ap-reviewer',
+    user: actorFrom(req),
     entity: 'invoice',
     reason: 'manual invoice correction and approval reset',
     ip: req.ip,
@@ -667,7 +692,7 @@ app.patch('/api/invoices/:id', requireAuth, requireRole('ap_clerk', 'ap_manager'
     oldValue: { status: previousStatus },
     newValue: { status: invoice.status, vendor: invoice.vendor, amount: invoice.amount, tax: invoice.tax }
   });
-  res.json({ invoice });
+  res.json({ invoice: decorateInvoice(invoice) });
 });
 
 app.post('/api/invoices/:id/action', requireAuth, requireRole('ap_clerk', 'ap_manager', 'finance_approver', 'admin'), async (req, res) => {
@@ -688,47 +713,53 @@ app.post('/api/invoices/:id/action', requireAuth, requireRole('ap_clerk', 'ap_ma
   }
 
   if (action === 'post') {
-    if (!['approved', 'ready_to_post'].includes(invoice.status)) {
+    if (![STATUSES.APPROVED, STATUSES.READY_TO_POST].includes(normalizeStatus(invoice.status))) {
       return res.status(409).json({ error: 'Invoice must be approved before posting' });
     }
     if (invoice.posting?.posted && invoice.posting.erpDocumentNumber) {
-      return res.json({ invoice, alreadyPosted: true });
+      return res.json({ invoice: decorateInvoice(invoice), alreadyPosted: true });
     }
-    const result = await erp.postInvoice(invoice);
-    invoice.status = 'posted';
-    invoice.posting = {
-      posted: true,
-      erpDocumentNumber: result.erpDocument,
-      postedAt: new Date().toISOString(),
-      error: null
-    };
-
-    const documentPolicy = validateDocumentType(invoice);
-    invoice.documentPolicy = documentPolicy;
-    if (!documentPolicy.allowedToPost) invoice.status = 'pending_review';
-    invoice.erpDocument = result.erpDocument;
-    invoice.issue = 'Posted to ERP after reviewer approval';
+    try {
+      const result = await erp.postInvoice(invoice);
+      invoice.status = STATUSES.POSTED;
+      invoice.posting = {
+        posted: true,
+        erpDocumentNumber: result.erpDocument,
+        postedAt: new Date().toISOString(),
+        error: null,
+        idempotencyKey: result.idempotencyKey
+      };
+      const documentPolicy = validateDocumentType(invoice);
+      invoice.documentPolicy = documentPolicy;
+      if (!documentPolicy.allowedToPost) invoice.status = STATUSES.PENDING_REVIEW;
+      invoice.erpDocument = result.erpDocument;
+      invoice.issue = 'Posted to ERP after reviewer approval';
+    } catch (error) {
+      invoice.status = STATUSES.POSTING_FAILED;
+      invoice.posting = { posted: false, erpDocumentNumber: null, postedAt: null, error: error.message };
+      invoice.issue = error.message;
+    }
   }
   if (action === 'approve') {
-    invoice.status = 'ready_to_post';
+    invoice.status = STATUSES.READY_TO_POST;
     invoice.issue = 'Approved by reviewer';
-    invoice.approval = { ...invoice.approval, required: false, reviewer: 'Reviewer', approvedAt: new Date().toISOString() };
+    invoice.approval = { ...invoice.approval, required: false, reviewer: actorFrom(req), approvedAt: new Date().toISOString() };
   }
   if (action === 'approve_override') {
-    invoice.status = 'pending_review';
+    invoice.status = STATUSES.PENDING_REVIEW;
     invoice.issue = req.body.reason || 'Override approved with justification';
-    invoice.approval = { ...invoice.approval, reviewer: 'Reviewer', approvedAt: new Date().toISOString(), overrideReason: req.body.reason || 'Override approval' };
+    invoice.approval = { ...invoice.approval, reviewer: actorFrom(req), approvedAt: new Date().toISOString(), overrideReason: req.body.reason || 'Override approval' };
   }
   if (action === 'query') {
-    invoice.status = 'pending_vendor_correction';
+    invoice.status = STATUSES.QUERY_OPEN;
     invoice.issue = 'Query sent to vendor owner for evidence';
   }
   if (action === 'reject') {
-    invoice.status = 'likely_reject';
+    invoice.status = STATUSES.REJECTED;
     invoice.issue = req.body.reason || 'Rejected due to validation or policy failure';
   }
   if (action === 'hold') {
-    invoice.status = 'On hold';
+    invoice.status = STATUSES.ON_HOLD;
     invoice.issue = 'Held for further investigation';
   }
 
@@ -746,7 +777,7 @@ app.post('/api/invoices/:id/action', requireAuth, requireRole('ap_clerk', 'ap_ma
   }
 
   recordAudit(`Invoice ${action}`, invoice, invoice.issue, {
-    user: 'ap-reviewer',
+    user: actorFrom(req),
     entity: 'invoice',
     reason: invoice.issue,
     ip: req.ip,
@@ -757,7 +788,15 @@ app.post('/api/invoices/:id/action', requireAuth, requireRole('ap_clerk', 'ap_ma
     oldValue: { status: (req.body?.previousStatus || invoice.status) },
     newValue: { status: invoice.status }
   });
-  res.json({ invoice });
+  res.json({ invoice: decorateInvoice(invoice) });
+});
+
+app.get('/api/invoices/:id/file', requireAuth, (req, res) => {
+  const invoice = invoices.find((item) => item.id === req.params.id);
+  if (!invoice?.storagePath || !fs.existsSync(invoice.storagePath)) {
+    return res.status(404).json({ error: 'Invoice file not found' });
+  }
+  return res.sendFile(path.resolve(invoice.storagePath));
 });
 
 app.get('*', (req, res) => res.sendFile(path.join(frontendDir, 'index.html')));
@@ -769,7 +808,10 @@ app.use((error, req, res, next) => {
 });
 
 if (require.main === module) {
-  app.listen(PORT, () => console.log(`Invoice Intelligence Hub running at http://localhost:${PORT}`));
+  ready.then(() => {
+    app.listen(PORT, () => console.log(`Invoice Intelligence Hub running at http://localhost:${PORT}`));
+  });
 }
 
 module.exports = app;
+module.exports.ready = ready;
