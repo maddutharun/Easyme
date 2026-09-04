@@ -1,5 +1,5 @@
 const crypto = require('node:crypto');
-const { JWT_SECRET, AUTH_REQUIRED } = require('../config/env');
+const { JWT_SECRET, AUTH_REQUIRED, NODE_ENV } = require('../config/env');
 const { getUserByEmail, verifyPassword } = require('./database.service');
 
 const encode = (value) => Buffer.from(JSON.stringify(value)).toString('base64url');
@@ -67,7 +67,7 @@ const optionalAuth = (req, res, next) => {
 const requireAuth = (req, res, next) => {
   const token = readToken(req);
   if (!token) {
-    if (!AUTH_REQUIRED) return next();
+    if (!AUTH_REQUIRED && NODE_ENV !== 'production') return next();
     return res.status(401).json({ error: 'Authentication required' });
   }
   try {
@@ -79,7 +79,7 @@ const requireAuth = (req, res, next) => {
 };
 
 const requireRole = (...allowedRoles) => (req, res, next) => {
-  if (!AUTH_REQUIRED && !req.user) return next();
+  if (!AUTH_REQUIRED && NODE_ENV !== 'production' && !req.user) return next();
   const userRole = req.user?.role;
   if (!userRole || !allowedRoles.includes(userRole)) {
     return res.status(403).json({ error: 'Forbidden: role not allowed' });

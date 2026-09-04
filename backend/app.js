@@ -9,7 +9,7 @@ const { extractInvoiceData, reconcileInvoiceAgainstErp, generateRecommendation }
 const { vendors, transactions, invoices: seedInvoices } = require('./data/seed');
 const { createErpAdapter } = require('./services/erp-adapter');
 const { matchingPolicy, uploadPolicy, allowedInvoiceMimeTypes, allowedInvoiceExtensions } = require('./config/app-config');
-const { PORT, AUTH_REQUIRED, STORAGE_PATH, NODE_ENV } = require('./config/env');
+const { PORT, AUTH_REQUIRED, STORAGE_PATH, NODE_ENV, TRUST_PROXY, DEMO_MODE } = require('./config/env');
 const { initializeDatabase, createPersistentStore } = require('./services/database.service');
 const { authenticate, signToken, requireAuth, requireRole } = require('./services/auth.service');
 const { decorateInvoice, isException, isPosted, isReview, STATUSES, normalizeStatus } = require('./src/status');
@@ -19,6 +19,10 @@ const { recordFeedback } = require('./src/services/feedback.service');
 const { validateDocumentType, nextStatus } = require('./src/services/scenario.service');
 const { validateFileSignature } = require('./src/services/file-security.service');
 const { APPROVAL_ROLES } = require('../services/posting.service');
+const { calculateConfidence } = require('./src/services/confidence.service');
+const { publicInvoice, isPathInsideRoot } = require('./src/services/public-invoice');
+const { collectExceptionReasons } = require('./src/services/exception-reasons.service');
+const { saveVendorTemplate } = require('./src/services/vendor-template.service');
 
 const APP_VERSION = 'ai-ap-invoice-v1.0.0';
 const APP_BUILD = 'premium-login';
@@ -27,6 +31,7 @@ const RULE_VERSION = 'invoice-rules-v1';
 const RECOMMENDATION_VERSION = 'recommendation-v1';
 
 const app = express();
+if (TRUST_PROXY) app.set('trust proxy', 1);
 const frontendDir = path.join(__dirname, '..', 'frontend');
 const uploadDir = STORAGE_PATH || path.join(__dirname, '..', 'uploads');
 fs.mkdirSync(uploadDir, { recursive: true });
@@ -73,6 +78,11 @@ app.use(helmet({
 }));
 app.use(cors({ origin: NODE_ENV === 'production' ? false : true, credentials: true }));
 app.use(rateLimiter);
+app.use((req, res, next) => {
+  req.requestId = crypto.randomUUID();
+  res.setHeader('X-Request-Id', req.requestId);
+  return next();
+});
 app.use(express.json({ limit: '2mb' }));
 
 const ready = initializeDatabase(seedInvoices).catch((error) => {
@@ -230,14 +240,32 @@ function sendFrontendIndex(_req, res) {
   return res.sendFile(path.join(frontendDir, 'index.html'));
 }
 
+const loginRateLimiter = (req, res, next) => {
+  const now = Date.now();
+  const windowMs = 15 * 60 * 1000;
+  const maxRequests = 20;
+  const key = `login:${req.ip || 'unknown'}`;
+  const bucket = global.__invoiceLoginLimit || (global.__invoiceLoginLimit = new Map());
+  const current = bucket.get(key) || { count: 0, resetAt: now + windowMs };
+  if (now > current.resetAt) {
+    current.count = 0;
+    current.resetAt = now + windowMs;
+  }
+  if (current.count >= maxRequests) {
+    return res.status(429).json({ error: 'Too many sign-in attempts. Please wait and try again.' });
+  }
+  current.count += 1;
+  bucket.set(key, current);
+  return next();
+};
+
 app.get('/__build', (_req, res) => {
   res.set('Cache-Control', 'no-store');
   res.json({
     build: APP_BUILD,
     loginRequired: true,
     title: 'EasyMe · Sign in',
-    branch: 'cursor/run-easyme-server-44a9',
-    demo: { email: 'finance@easyme.local', password: 'demo123' },
+    demoMode: DEMO_MODE,
     wrongServerIfYouSee: ['Ari R.', 'Finance Ops', 'EasyMe Invoice Intelligence', 'Today • 09:40']
   });
 });
@@ -255,7 +283,7 @@ app.use(express.static(frontendDir, {
   }
 }));
 
-app.post('/api/auth/login', async (req, res) => {
+app.post('/api/auth/login', loginRateLimiter, async (req, res) => {
   const { email, password } = req.body || {};
   const user = await authenticate(email, password);
   if (!user) {
@@ -277,17 +305,18 @@ app.get('/api/config', (req, res) => res.json({
   supportedUploadTypes: uploadPolicy.supportedTypes,
   maxUploadSizeMb: uploadPolicy.maxSizeMb,
   authRequired: AUTH_REQUIRED,
-  demoUsers: [
+  demoMode: DEMO_MODE,
+  demoUsers: DEMO_MODE ? [
     { email: 'finance@easyme.local', role: 'finance_approver' },
     { email: 'manager@easyme.local', role: 'ap_manager' },
     { email: 'clerk@easyme.local', role: 'ap_clerk' }
-  ]
+  ] : []
 }));
 
 app.get('/api/summary', requireAuth, (req, res) => {
   const metrics = metricsSnapshot();
   res.json({
-    invoices: invoices.map((invoice) => decorateInvoiceWorkflow(invoice)),
+    invoices: invoices.map((invoice) => publicInvoice(decorateInvoiceWorkflow(invoice))),
     vendors,
     transactions,
     metrics: {
@@ -307,7 +336,7 @@ app.get('/api/version', (req, res) => {
   });
 });
 
-app.get('/api/observability', (req, res) => {
+app.get('/api/observability', requireAuth, (req, res) => {
   const allInvoices = invoices.map((invoice) => Number(invoice.amount || 0));
   res.json({
     appVersion: APP_VERSION,
@@ -359,10 +388,25 @@ app.get('/api/audit', requireAuth, (req, res) => {
   res.json({ audit: audit.slice(-50).reverse(), total: audit.length });
 });
 
+app.get('/api/exports/audit', requireAuth, requireRole('finance_approver', 'admin'), (req, res) => {
+  const header = 'id,timestamp,action,actor,invoiceId,detail';
+  const rows = audit.map((entry) => [
+    entry.id,
+    entry.timestamp || entry.at,
+    JSON.stringify(entry.action || ''),
+    JSON.stringify(entry.actor || entry.user || ''),
+    entry.invoiceId || entry.entityId || '',
+    JSON.stringify(entry.detail || '')
+  ].join(','));
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', 'attachment; filename="easyme-audit.csv"');
+  res.send([header, ...rows].join('\n'));
+});
+
 app.get('/api/invoices', requireAuth, (req, res) => {
   const query = String(req.query.search || '').toLowerCase();
   const result = invoices
-    .map((invoice) => decorateInvoice(invoice))
+    .map((invoice) => publicInvoice(decorateInvoice(invoice)))
     .filter((invoice) => !query || `${invoice.id} ${invoice.invoiceNumber} ${invoice.vendor} ${invoice.po || ''}`.toLowerCase().includes(query));
   res.json({ invoices: result, total: result.length });
 });
@@ -374,11 +418,12 @@ app.get('/api/health', async (req, res) => {
     erp: erpHealth.ok ? 'connected' : 'degraded',
     storage: 'sqlite',
     mode: AUTH_REQUIRED ? 'secured' : 'demo',
+    env: NODE_ENV,
     checkedAt: new Date().toISOString()
   });
 });
 
-app.get('/api/roles', (req, res) => {
+app.get('/api/roles', requireAuth, (req, res) => {
   res.json({
     roles: [
       { name: 'ap_clerk', permissions: APPROVAL_ROLES.ap_clerk },
@@ -393,7 +438,7 @@ app.get('/api/metrics', requireAuth, (req, res) => {
   res.json({ metrics: metricsSnapshot(), timestamp: new Date().toISOString() });
 });
 
-app.get('/api/queue', (req, res) => {
+app.get('/api/queue', requireAuth, (req, res) => {
   res.json({ jobs: invoiceQueue.list() });
 });
 
@@ -402,24 +447,44 @@ app.get('/api/invoices/:id', requireAuth, (req, res) => {
   if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
   const po = transactions.find((item) => item.po === invoice.po);
   const comparison = reconcileInvoiceAgainstErp({ ...invoice, quantity: invoice.lineItems || invoice.quantity || 1, duplicate: false, totalValid: true }, { vendors, transactions });
-  res.json({ invoice, po, checks: comparison.checks, reasoning: comparison.reasoning, compliance: comparison.compliance });
+  res.json({ invoice: publicInvoice(invoice), po, checks: comparison.checks, reasoning: comparison.reasoning, compliance: comparison.compliance });
 });
 
 app.get('/api/invoices/:id/evidence', requireAuth, (req, res) => {
   const invoice = invoices.find((item) => item.id === req.params.id);
   if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
-  res.json({ invoiceId: invoice.id, checks: invoice.checks || [], reasoning: invoice.reasoning || [], recommendation: invoice.aiRecommendation || invoice.recommendation || null, history: invoice.similarTransactions || [] });
+  res.json({
+    invoiceId: invoice.id,
+    checks: invoice.checks || [],
+    reasoning: invoice.reasoning || [],
+    recommendation: invoice.aiRecommendation || invoice.recommendation || null,
+    history: invoice.similarTransactions || [],
+    fieldEvidence: invoice.fieldEvidence || {},
+    exceptionReasons: invoice.exceptionReasons || []
+  });
 });
 
 app.post('/api/invoices/:id/review', requireAuth, requireRole('ap_clerk', 'ap_manager', 'finance_approver', 'admin'), (req, res) => {
   const invoice = invoices.find((item) => item.id === req.params.id);
   if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
   const previousStatus = invoice.status;
-  Object.assign(invoice, req.body || {});
+  const allowedFields = [
+    'vendor', 'supplierName', 'supplierGstin', 'supplierPan', 'supplierAddress', 'supplierState',
+    'invoiceNumber', 'date', 'dueDate', 'currency', 'po', 'amount', 'tax', 'baseAmount',
+    'taxAmount', 'totalAmount', 'hsnCode', 'description', 'shipToDetails', 'sealPresent',
+    'signaturePresent', 'businessDetails', 'reason'
+  ];
+  const corrections = {};
+  for (const [key, value] of Object.entries(req.body || {})) {
+    if (!allowedFields.includes(key)) continue;
+    if (key === 'reason') continue;
+    invoice[key] = value;
+    corrections[key] = value;
+  }
   invoice.status = STATUSES.PENDING_REVIEW;
   invoice.reviewedAt = new Date().toISOString();
-  recordAudit('Invoice reviewed', invoice, req.body?.reason || 'Review completed', { previousStatus, actorId: req.user?.sub || 'system', corrections: req.body || {} });
-  res.json({ invoice: decorateInvoice(invoice) });
+  recordAudit('Invoice reviewed', invoice, req.body?.reason || 'Review completed', { previousStatus, actorId: req.user?.sub || 'system', corrections });
+  res.json({ invoice: publicInvoice(decorateInvoice(invoice)) });
 });
 
 app.get('/api/invoices/:id/audit', requireAuth, (req, res) => {
@@ -467,7 +532,7 @@ app.get('/api/dashboard/metrics', requireAuth, (req, res) => {
 });
 
 app.get('/api/exceptions', requireAuth, (req, res) => {
-  const exceptions = invoices.map((invoice) => decorateInvoice(invoice)).filter((invoice) => isException(invoice.status));
+  const exceptions = invoices.map((invoice) => publicInvoice(decorateInvoice(invoice))).filter((invoice) => isException(invoice.status));
   res.json({ exceptions, total: exceptions.length });
 });
 
@@ -487,7 +552,7 @@ app.post('/api/invoices/:id/recommendation', requireAuth, requireRole('ap_manage
     confidence: recommendation.confidence
   }));
 
-  res.json({ recommendation, invoice });
+  res.json({ recommendation, invoice: publicInvoice(invoice) });
 });
 
 app.post('/api/invoices/:id/post', requireAuth, requireRole('finance_approver', 'admin'), async (req, res) => {
@@ -498,40 +563,55 @@ app.post('/api/invoices/:id/post', requireAuth, requireRole('finance_approver', 
     return res.status(409).json({ error: 'Invoice must be approved before posting' });
   }
   if (invoice.posting?.posted && invoice.posting.erpDocumentNumber) {
-    return res.json({ invoice, posting: invoice.posting, alreadyPosted: true });
+    return res.json({ invoice: publicInvoice(invoice), posting: invoice.posting, alreadyPosted: true });
   }
   if (!invoice.aiRecommendation) {
     const recommendation = generateRecommendation(invoice, { vendors, transactions });
     invoice.aiRecommendation = recommendation;
   }
 
-  const result = await erp.postInvoice(invoice);
-  invoice.status = 'posted';
-  invoice.posting = {
-    posted: true,
-    erpDocumentNumber: result.erpDocument,
-    postedAt: new Date().toISOString(),
-    error: null,
-    idempotencyKey: result.idempotencyKey || `INV-${invoice.id}`
-  };
-  invoice.issue = 'Posted to ERP after AI recommendation and reviewer approval';
+  try {
+    const result = await erp.postInvoice(invoice);
+    invoice.status = 'posted';
+    invoice.posting = {
+      posted: true,
+      erpDocumentNumber: result.erpDocument,
+      postedAt: new Date().toISOString(),
+      error: null,
+      idempotencyKey: result.idempotencyKey || `INV-${invoice.id}`
+    };
+    invoice.issue = 'Posted to ERP after AI recommendation and reviewer approval';
 
-  recordAudit('Invoice posted to ERP', invoice, JSON.stringify({
-    erpDocumentNumber: result.erpDocument,
-    idempotencyKey: result.idempotencyKey || `INV-${invoice.id}`
-  }));
+    recordAudit('Invoice posted to ERP', invoice, JSON.stringify({
+      erpDocumentNumber: result.erpDocument,
+      idempotencyKey: result.idempotencyKey || `INV-${invoice.id}`
+    }));
 
-  res.json({ invoice, posting: invoice.posting });
+    res.json({ invoice: publicInvoice(invoice), posting: invoice.posting });
+  } catch (error) {
+    invoice.status = STATUSES.POSTING_FAILED;
+    invoice.posting = { posted: false, erpDocumentNumber: null, postedAt: null, error: error.message };
+    invoice.issue = error.message;
+    recordAudit('Invoice posting failed', invoice, error.message);
+    res.status(502).json({ error: error.message, invoice: publicInvoice(invoice) });
+  }
 });
 
-app.get('/api/pipeline/:id', (req, res) => {
+app.get('/api/pipeline/:id', requireAuth, (req, res) => {
   const invoice = invoices.find((item) => item.id === req.params.id);
   if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
-  res.json({ pipeline: invoice.pipeline || { status: invoice.status, stages: [] }, invoice });
+  res.json({ pipeline: invoice.pipeline || { status: invoice.status, stages: [] }, invoice: publicInvoice(invoice) });
 });
 
-app.post('/api/invoices/upload', requireAuth, upload.single('invoice'), async (req, res) => {
+app.post('/api/invoices/upload', requireAuth, upload.single('invoice'), handleInvoiceUpload);
+app.post('/api/inbox/ingest', requireAuth, upload.single('invoice'), (req, res, next) => {
+  req.body = { ...(req.body || {}), sourceChannel: 'email_drop' };
+  return handleInvoiceUpload(req, res, next);
+});
+
+async function handleInvoiceUpload(req, res) {
   if (!req.file) return res.status(400).json({ error: 'Upload a PDF, PNG, JPG, or Excel invoice no larger than 10 MB.' });
+  const sourceChannel = req.body?.sourceChannel === 'email_drop' ? 'email_drop' : 'web_upload';
 
   try {
     const fileSignature = validateFileSignature(req.file);
@@ -553,7 +633,7 @@ app.post('/api/invoices/upload', requireAuth, upload.single('invoice'), async (r
 
   const pipeline = createPipelineState({
     documentType,
-    sourceChannel: 'web_upload',
+    sourceChannel,
     fileName: req.file.originalname,
     duplicateFile: duplicateFile || duplicateInvoice, // Wire BOTH file-hash and invoice-content duplicates
     extracted,
@@ -595,7 +675,7 @@ app.post('/api/invoices/upload', requireAuth, upload.single('invoice'), async (r
     statusMachine: nextStatus('RECEIVED', 'extract'),
     documentType: String(extracted.documentType || 'STANDARD_INVOICE').toUpperCase(),
     referenceInvoiceNo: extracted.referenceInvoiceNo || null,
-    sourceChannel: 'web_upload',
+    sourceChannel,
     fileName: req.file.originalname,
     fileHash,
     duplicateFile,
@@ -611,6 +691,13 @@ app.post('/api/invoices/upload', requireAuth, upload.single('invoice'), async (r
     extraction: isReadable ? 'OCR + ERP validation' : 'Manual review required',
     aiSummary,
     decision: routing,
+    compositeConfidence: calculateConfidence({
+      extraction: Number(extracted.documentQuality?.score || 0) * 100,
+      vendor: vendor ? 100 : 25,
+      twoWay: comparison.poMatch ? 100 : 35,
+      historical: extracted.historicalMatch === false ? 40 : 80,
+      accounting: extracted.arithmeticValidation?.passed === false ? 35 : 85
+    }),
     hardGates: comparison.checks.filter((check) => check.severity === 'critical' && !check.passed).map((check) => check.name),
     vendorOnboarding: vendor ? null : { required: true, reason: 'Vendor not matched to ERP master' },
     nonPoInvoice: !matchingPo?.po,
@@ -639,6 +726,16 @@ app.post('/api/invoices/upload', requireAuth, upload.single('invoice'), async (r
   };
 
   invoice.workflow = buildWorkflowSummary(invoice, routing);
+  invoice.exceptionReasons = collectExceptionReasons({
+    extracted,
+    comparison,
+    duplicate: duplicateFile || duplicateInvoice,
+    vendor,
+    invoices
+  });
+  if (invoice.exceptionReasons.length) {
+    invoice.issue = invoice.exceptionReasons[0];
+  }
 
   if (!isReadable) {
     invoice.amount = 0;
@@ -670,13 +767,13 @@ app.post('/api/invoices/upload', requireAuth, upload.single('invoice'), async (r
     recommendation_version: RECOMMENDATION_VERSION,
     newValue: { fileName: req.file.originalname, vendor: invoice.vendor, invoiceNumber: invoice.invoiceNumber }
   });
-  res.status(201).json({ invoice, readable: isReadable, pipeline: invoice.pipeline, storagePath: storedFilePath });
+  res.status(201).json({ invoice: publicInvoice(invoice), readable: isReadable, pipeline: invoice.pipeline, hasFile: true });
   } catch (uploadError) {
     // CRITICAL FIX: Log extraction and reconciliation errors instead of swallowing them
     console.error('[uploadError] Invoice upload and analysis failed:', uploadError.message, uploadError.stack);
     res.status(500).json({ error: 'Invoice processing failed. Please check the server logs.' });
   }
-});
+}
 
 app.patch('/api/invoices/:id', requireAuth, requireRole('ap_clerk', 'ap_manager', 'finance_approver', 'admin'), (req, res) => {
   const invoice = invoices.find((item) => item.id === req.params.id);
@@ -709,6 +806,11 @@ app.patch('/api/invoices/:id', requireAuth, requireRole('ap_clerk', 'ap_manager'
     invoice.status = STATUSES.PENDING_REVIEW;
     invoice.decision = { ...((invoice.decision || {})), requiresHumanReview: true, label: 'Pending review', status: 'pending_review' };
     invoice.workflow = buildWorkflowSummary(invoice, invoice.decision || { requiresHumanReview: true, label: 'Pending review' });
+    saveVendorTemplate({
+      gstin: invoice.supplierGstin,
+      vendor: invoice.vendor,
+      columnMap: invoice.tableSchema || invoice.fieldEvidence || {}
+    }).catch((error) => console.warn('[templates] save failed', error.message));
   }
 
   recordAudit('Invoice reviewed', invoice, `Reviewed invoice ${invoice.invoiceNumber || invoice.id}`, {
@@ -723,7 +825,7 @@ app.patch('/api/invoices/:id', requireAuth, requireRole('ap_clerk', 'ap_manager'
     oldValue: { status: previousStatus },
     newValue: { status: invoice.status, vendor: invoice.vendor, amount: invoice.amount, tax: invoice.tax }
   });
-  res.json({ invoice: decorateInvoice(invoice) });
+  res.json({ invoice: publicInvoice(decorateInvoice(invoice)) });
 });
 
 app.post('/api/invoices/:id/action', requireAuth, requireRole('ap_clerk', 'ap_manager', 'finance_approver', 'admin'), async (req, res) => {
@@ -748,7 +850,7 @@ app.post('/api/invoices/:id/action', requireAuth, requireRole('ap_clerk', 'ap_ma
       return res.status(409).json({ error: 'Invoice must be approved before posting' });
     }
     if (invoice.posting?.posted && invoice.posting.erpDocumentNumber) {
-      return res.json({ invoice: decorateInvoice(invoice), alreadyPosted: true });
+      return res.json({ invoice: publicInvoice(decorateInvoice(invoice)), alreadyPosted: true });
     }
     try {
       const result = await erp.postInvoice(invoice);
@@ -819,12 +921,15 @@ app.post('/api/invoices/:id/action', requireAuth, requireRole('ap_clerk', 'ap_ma
     oldValue: { status: (req.body?.previousStatus || invoice.status) },
     newValue: { status: invoice.status }
   });
-  res.json({ invoice: decorateInvoice(invoice) });
+  res.json({ invoice: publicInvoice(decorateInvoice(invoice)) });
 });
 
 app.get('/api/invoices/:id/file', requireAuth, (req, res) => {
   const invoice = invoices.find((item) => item.id === req.params.id);
   if (!invoice?.storagePath || !fs.existsSync(invoice.storagePath)) {
+    return res.status(404).json({ error: 'Invoice file not found' });
+  }
+  if (!isPathInsideRoot(invoice.storagePath, uploadDir)) {
     return res.status(404).json({ error: 'Invoice file not found' });
   }
   return res.sendFile(path.resolve(invoice.storagePath));

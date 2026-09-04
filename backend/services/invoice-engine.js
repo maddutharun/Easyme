@@ -1,7 +1,9 @@
 const fs = require('fs');
 const XLSX = require('xlsx');
-const { extractLineItems, extractTaxBreakdown, extractCharges, extractTaxSummary, detectTemplate, detectColumnMap, buildFieldEvidence, validateArithmetic, deduplicateDocumentText } = require('../src/services/line-item-extraction.service');
+const { extractLineItems, extractLineItemsFromLayout, extractTaxBreakdown, extractCharges, extractTaxSummary, detectTemplate, detectColumnMap, buildFieldEvidence, validateArithmetic, deduplicateDocumentText } = require('../src/services/line-item-extraction.service');
 const { scoreDocumentQuality, getVendorTemplate, extractPdfLayout } = require('../src/services/document-intelligence.service');
+const { HttpDocumentAiProvider } = require('../src/ai/http.provider');
+const { findVendorTemplate } = require('../src/services/vendor-template.service');
 
 async function extractPdfText(buffer) {
   if (!buffer || buffer.length === 0) return '';
@@ -1079,7 +1081,11 @@ async function extractInvoiceData(file) {
     || normalizedText.split(/\n|;/).map((line) => line.trim()).find((line) => /[A-Za-z]/.test(line) && !/^(invoice|tax invoice|vendor|invoice no|date|hsn|sac|gst|total|output gst|state name|item)$/i.test(line) && line.length > 8 && !/^\d+$/.test(line))
     || null;
 
-  const extractedLineItems = extractLineItems(normalizedText);
+  const extractedLineItems = (() => {
+    const fromText = extractLineItems(normalizedText);
+    if (fromText.length) return fromText;
+    return extractLineItemsFromLayout(layout);
+  })();
   const charges = extractCharges(normalizedText);
   const taxSummary = extractTaxSummary(normalizedText);
   const computedTaxableAmount = extractedLineItems.reduce((sum, line) => sum + Number(line.taxableAmount || 0), 0);
@@ -1273,6 +1279,25 @@ async function extractInvoiceData(file) {
       severity: 'critical'
     });
     extracted.validation.issues.push(extractionWarnings[0]);
+  }
+
+  const learned = await findVendorTemplate({ gstin: extracted.supplierGstin, vendor: extracted.vendor }).catch(() => null);
+  if (learned) {
+    extracted.vendorTemplate = { ...extracted.vendorTemplate, learned: true, id: learned.id, columnMap: learned.columnMap };
+  }
+
+  if (process.env.DOCUMENT_AI_URL) {
+    try {
+      const provider = new HttpDocumentAiProvider({
+        url: process.env.DOCUMENT_AI_URL,
+        apiKey: process.env.DOCUMENT_AI_KEY,
+        sendFile: process.env.DOCUMENT_AI_SEND_FILE === 'true'
+      });
+      const enriched = await provider.extractInvoice(file, extracted);
+      Object.assign(extracted, enriched);
+    } catch (error) {
+      extracted.extractionWarnings = [...(extracted.extractionWarnings || []), 'Document AI enrichment skipped'];
+    }
   }
 
   return extracted;

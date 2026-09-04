@@ -93,7 +93,7 @@ export function renderInvoiceDetailPage({ appView, invoice, state, renderBreadcr
 
       <div class="review-workspace">
         <div>
-          ${invoice.storagePath || invoice.fileName
+          ${invoice.hasFile || invoice.storagePath || invoice.fileName
             ? '<iframe class="document-preview" title="Invoice document" src="about:blank"></iframe>'
             : paperDocument(invoice, currencyFormatter)}
         </div>
@@ -106,6 +106,13 @@ export function renderInvoiceDetailPage({ appView, invoice, state, renderBreadcr
             </div>
           </div>
           <div class="review-group-container">${reviewForm}</div>
+          <h4 style="margin: 20px 0 8px;">Why this is in review</h4>
+          <ul class="check-list" style="margin-bottom:12px;">
+            ${(invoice.exceptionReasons || []).length
+              ? invoice.exceptionReasons.map((reason) => `<li class="check-row"><div>${escapeHtml(reason)}</div></li>`).join('')
+              : `<li class="check-row"><div>${escapeHtml(why)}</div></li>`}
+          </ul>
+          ${invoice.fieldEvidence ? `<h4 style="margin: 12px 0 8px;">Field evidence</h4><div class="check-list">${Object.entries(invoice.fieldEvidence).slice(0, 8).map(([field, evidence]) => `<div class="check-row"><div><strong>${escapeHtml(field)}</strong><div style="color:var(--muted);font-size:0.82rem;">${escapeHtml(evidence.value ?? '')} · ${escapeHtml(evidence.source || '')} · ${Math.round(Number(evidence.confidence || 0) * 100)}%</div></div></div>`).join('')}</div>` : ''}
           <h4 style="margin: 20px 0 8px;">ERP checks</h4>
           <div class="check-list">
             ${checks.length ? checks.map((check) => `<div class="check-row"><div><strong>${escapeHtml(check.name)}</strong><div style="color:var(--muted);font-size:0.82rem;">${escapeHtml(check.detail || '')}</div></div><span class="badge ${check.passed ? 'badge-success' : 'badge-danger'}">${check.passed ? 'Pass' : 'Fail'}</span></div>`).join('') : '<div class="empty-state-text">Checks appear after matching.</div>'}
@@ -198,7 +205,7 @@ export function renderInvoiceDetailPage({ appView, invoice, state, renderBreadcr
     showToast('Accounting feedback recorded', 'success');
   });
 
-  if (invoice.storagePath || invoice.fileName) {
+  if (invoice.hasFile || invoice.storagePath || invoice.fileName) {
     apiFetch(`/api/invoices/${invoice.id}/file`).then(async (response) => {
       if (!response.ok) return;
       const frame = document.querySelector('.document-preview');

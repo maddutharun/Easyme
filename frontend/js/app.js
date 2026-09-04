@@ -760,6 +760,16 @@ function showLogin(visible) {
 }
 
 async function bootstrapSession() {
+  try {
+    const configResponse = await fetch('/api/config');
+    const config = await configResponse.json();
+    if (!config.demoMode) {
+      document.querySelector('.login-hint')?.setAttribute('hidden', 'hidden');
+      document.querySelector('.role-chips')?.setAttribute('hidden', 'hidden');
+    }
+  } catch (error) {
+    // keep demo login copy if config is unavailable
+  }
   if (!getToken()) {
     showLogin(true);
     return;

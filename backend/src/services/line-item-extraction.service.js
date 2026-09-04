@@ -52,6 +52,19 @@ const extractLineItems = (text) => {
   return items;
 };
 
+const extractLineItemsFromLayout = (layout) => {
+  if (!layout?.pages?.length) return [];
+  const items = [];
+  for (const page of layout.pages) {
+    for (const row of page.rows || []) {
+      const text = (row.items || []).map((item) => item.text).join(' ').replace(/\s+/g, ' ').trim();
+      const parsed = parseLineItem(text);
+      if (parsed) items.push(parsed);
+    }
+  }
+  return items;
+};
+
 const detectTemplate = (text) => {
   const value = String(text || '');
   if (/tax invoice|gstin|hsn|sac/i.test(value)) return 'india-gst-table';
@@ -126,4 +139,4 @@ const extractTaxSummary = (text) => {
   return { rates, taxableAmount: rates.reduce((sum, row) => sum + row.taxableAmount, 0), taxAmount: rates.reduce((sum, row) => sum + row.taxAmount, 0), igstAmount: rates.reduce((sum, row) => sum + row.igstAmount, 0) };
 };
 
-module.exports = { extractLineItems, extractTaxBreakdown, extractCharges, extractTaxSummary, parseMoney, detectTemplate, detectColumnMap, buildFieldEvidence, validateArithmetic, normalizeInvoiceLines, deduplicateDocumentText };
+module.exports = { extractLineItems, extractLineItemsFromLayout, extractTaxBreakdown, extractCharges, extractTaxSummary, parseMoney, detectTemplate, detectColumnMap, buildFieldEvidence, validateArithmetic, normalizeInvoiceLines, deduplicateDocumentText };

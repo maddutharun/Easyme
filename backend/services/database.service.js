@@ -4,6 +4,7 @@ const crypto = require('node:crypto');
 const sqlite3 = require('sqlite3').verbose();
 const { DB_PATH } = require('../config/env');
 const { decorateInvoice, normalizeStatus } = require('../src/status');
+const { attachDatabase, ensureVendorTemplateTable } = require('../src/services/vendor-template.service');
 
 let db;
 const invoices = [];
@@ -64,45 +65,58 @@ function openDatabase() {
   return db;
 }
 
-async function persist() {
+async function persistNow() {
   if (!db) return;
-  await run('DELETE FROM invoices');
-  await run('DELETE FROM audit_logs');
-  for (const invoice of invoices) {
-    const normalized = decorateInvoice(invoice);
-    invoice.status = normalized.status;
-    await run(
-      `INSERT INTO invoices (id, vendor, invoice_number, amount, currency, po, status, payload, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        invoice.id,
-        invoice.vendor || null,
-        invoice.invoiceNumber || null,
-        Number(invoice.amount || 0),
-        invoice.currency || 'USD',
-        invoice.po || null,
-        invoice.status,
-        JSON.stringify(invoice),
-        invoice.createdAt || new Date().toISOString(),
-        new Date().toISOString()
-      ]
-    );
+  await run('BEGIN IMMEDIATE');
+  try {
+    await run('DELETE FROM invoices');
+    await run('DELETE FROM audit_logs');
+    for (const invoice of invoices) {
+      const normalized = decorateInvoice(invoice);
+      invoice.status = normalized.status;
+      await run(
+        `INSERT INTO invoices (id, vendor, invoice_number, amount, currency, po, status, payload, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          invoice.id,
+          invoice.vendor || null,
+          invoice.invoiceNumber || null,
+          Number(invoice.amount || 0),
+          invoice.currency || 'USD',
+          invoice.po || null,
+          invoice.status,
+          JSON.stringify(invoice),
+          invoice.createdAt || new Date().toISOString(),
+          new Date().toISOString()
+        ]
+      );
+    }
+    for (const entry of audit) {
+      await run(
+        `INSERT INTO audit_logs (id, invoice_id, action, actor, details, metadata, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [
+          entry.id,
+          entry.invoiceId || entry.entityId || null,
+          entry.action,
+          entry.actor || entry.user || 'system',
+          entry.detail || '',
+          JSON.stringify(entry),
+          entry.timestamp || entry.at || new Date().toISOString()
+        ]
+      );
+    }
+    await run('COMMIT');
+  } catch (error) {
+    await run('ROLLBACK').catch(() => {});
+    throw error;
   }
-  for (const entry of audit) {
-    await run(
-      `INSERT INTO audit_logs (id, invoice_id, action, actor, details, metadata, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [
-        entry.id,
-        entry.invoiceId || entry.entityId || null,
-        entry.action,
-        entry.actor || entry.user || 'system',
-        entry.detail || '',
-        JSON.stringify(entry),
-        entry.timestamp || entry.at || new Date().toISOString()
-      ]
-    );
-  }
+}
+
+let persistChain = Promise.resolve();
+async function persist() {
+  persistChain = persistChain.then(persistNow, persistNow);
+  return persistChain;
 }
 
 function createPersistentStore(seedInvoices = []) {
@@ -245,6 +259,9 @@ async function initializeDatabase(seedInvoices = []) {
       created_at TEXT DEFAULT CURRENT_TIMESTAMP
     )
   `);
+
+  attachDatabase({ run, all });
+  await ensureVendorTemplateTable();
 
   for (const [id, email, role, password, name] of DEMO_USERS) {
     const existing = await get('SELECT id, password_hash FROM users WHERE email = ?', [email]);
