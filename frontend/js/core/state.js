@@ -1,7 +1,7 @@
 export const state = {
   invoices: [],
   selectedInvoiceId: null,
-  currentView: 'upload',
+  currentView: 'exceptions',
   activeFile: null,
   exportType: 'json',
   searchQuery: '',

@@ -4,11 +4,15 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>EasyMe Invoice Intelligence</title>
-    <meta name="description" content="Modern invoice intelligence and approval workspace" />
+    <meta name="description" content="Invoice matching, exception review, and ERP posting workspace" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@500&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
     <link rel="stylesheet" href="/css/styles.css" />
     <link rel="stylesheet" href="/css/enhancements.css" />
     <link rel="stylesheet" href="/css/review-panel.css" />
     <link rel="stylesheet" href="/css/integrations.css" />
+    <link rel="stylesheet" href="/css/premium.css" />
   </head>
   <body>
     <div class="app-shell">
@@ -17,18 +21,18 @@
           <div class="brand-mark">E</div>
           <div class="brand-copy">
             <div class="brand-title">EasyMe</div>
-            <div class="brand-subtitle">Invoice Studio</div>
+            <div class="brand-subtitle">Accounts payable</div>
           </div>
-          <button class="sidebar-toggle" id="sidebarToggle" aria-label="Toggle sidebar" title="Expand/Collapse">
-            <span class="toggle-icon">◄</span>
+          <button class="sidebar-toggle" id="sidebarToggle" aria-label="Collapse sidebar" title="Collapse sidebar">
+            <span class="toggle-icon">‹</span>
           </button>
         </div>
 
         <nav class="nav" aria-label="Sidebar navigation">
-          <button class="nav-item" data-view="dashboard">Dashboard</button>
-          <button class="nav-item active" data-view="upload">Upload</button>
-          <button class="nav-item" data-view="invoices">Invoices</button>
           <button class="nav-item" data-view="exceptions">Exceptions</button>
+          <button class="nav-item" data-view="invoices">Invoices</button>
+          <button class="nav-item" data-view="upload">Upload</button>
+          <button class="nav-item" data-view="dashboard">Dashboard</button>
           <button class="nav-item" data-view="workflow">Workflow</button>
           <button class="nav-item" data-view="exports">Exports</button>
         </nav>
@@ -36,8 +40,8 @@
         <div class="sidebar-footer">
           <div class="mini-badge">Live ops</div>
           <div class="mini-metric">
-            <span>Exception queue</span>
-            <strong id="queueCount">0 items</strong>
+            <span>Needs decision</span>
+            <strong id="queueCount">0</strong>
           </div>
         </div>
       </aside>
@@ -46,21 +50,23 @@
         <header class="main-header">
           <button class="menu-toggle-btn" id="menuToggle" aria-label="Toggle sidebar menu" title="Menu">☰</button>
           <div class="search-wrap">
-            <span class="search-icon">⌕</span>
-            <input type="search" placeholder="Search invoices, vendors, status..." aria-label="Search invoices" />
+            <span class="search-icon" aria-hidden="true">⌕</span>
+            <input id="globalSearch" type="search" placeholder="Search vendor, invoice, PO, or status" aria-label="Search invoices" />
           </div>
 
           <div class="header-actions">
-            <button class="icon-btn" aria-label="Notifications">🔔</button>
-            <button class="icon-btn" aria-label="Reports">📊</button>
-            <button class="theme-toggle-btn" id="themeToggle" aria-label="Toggle dark mode" title="Toggle dark mode">🌙</button>
-            <div class="profile-pill" id="profilePill">
+            <button class="icon-btn" id="noticeToggle" aria-label="Audit notifications" type="button">Alerts</button>
+            <button class="icon-btn" id="reportsButton" aria-label="Open exports" type="button">Reports</button>
+            <button class="theme-toggle-btn" id="themeToggle" aria-label="Toggle dark mode" title="Toggle dark mode">☾</button>
+            <div class="profile-pill" id="profilePill" tabindex="0" role="button" aria-haspopup="menu" aria-expanded="false">
               <div class="profile-avatar" id="profileAvatar">—</div>
               <div class="profile-meta">
                 <span class="profile-name" id="profileName">Sign in</span>
                 <span class="profile-role" id="profileRole">Restricted</span>
               </div>
+              <div id="accountMenu" class="account-menu" role="menu"></div>
             </div>
+            <div id="noticePanel" class="notice-panel" hidden></div>
           </div>
         </header>
 
@@ -68,13 +74,21 @@
         <div id="toastContainer" class="toast-container"></div>
         <div id="loginGate" class="login-gate" role="dialog" aria-modal="true" aria-labelledby="loginTitle">
           <form id="loginForm" class="login-card">
-            <div class="brand-title">EasyMe</div>
-            <h1 id="loginTitle">Sign in to Invoice Studio</h1>
-            <p>Role-based access for extraction, exception review, and ERP posting.</p>
-            <label>Email<input name="email" type="email" value="finance@easyme.local" autocomplete="username" required /></label>
-            <label>Password<input name="password" type="password" value="demo123" autocomplete="current-password" required /></label>
+            <div class="login-kicker">EasyMe</div>
+            <h1 id="loginTitle">Sign in to review and post</h1>
+            <p>Exception review, matching evidence, and ERP posting in one workspace.</p>
+            <div class="role-chips" aria-label="Demo roles">
+              <button type="button" class="role-chip" data-email="finance@easyme.local" aria-pressed="true">Finance · post</button>
+              <button type="button" class="role-chip" data-email="manager@easyme.local" aria-pressed="false">Manager · review</button>
+              <button type="button" class="role-chip" data-email="clerk@easyme.local" aria-pressed="false">Clerk · query</button>
+            </div>
+            <label>Email<input id="loginEmail" name="email" type="email" value="finance@easyme.local" autocomplete="username" required /></label>
+            <label class="password-row">Password
+              <input id="loginPassword" name="password" type="password" autocomplete="current-password" required />
+              <button type="button" id="togglePassword">Show</button>
+            </label>
             <button class="primary-button" type="submit">Continue</button>
-            <p class="login-hint">Demo: finance@easyme.local / demo123 (full posting). Clerk can review but cannot post.</p>
+            <p class="login-hint">Demo password is demo123. Finance can post; clerk cannot.</p>
             <div id="loginError" class="upload-status error" hidden></div>
           </form>
         </div>

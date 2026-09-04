@@ -1,5 +1,9 @@
 import { getStatusClass, humanizeStatus } from '../core/status.js';
 
+function failedChecks(invoice) {
+  return (invoice.checks || []).filter((check) => !check.passed).map((check) => check.name);
+}
+
 export function renderExceptionsPage({ appView, state, renderBreadcrumbBar, formatMoney }) {
   const exceptions = (state.invoices || []).filter((invoice) => invoice.isException || ['pending_review', 'on_hold', 'rejected', 'query_open', 'posting_failed'].includes(String(invoice.status || '').toLowerCase()));
 
@@ -9,29 +13,32 @@ export function renderExceptionsPage({ appView, state, renderBreadcrumbBar, form
       <div class="page-header">
         <div>
           <h1 class="page-title">Exception queue</h1>
-          <p class="page-subtitle">Invoices that need a human decision before ERP posting.</p>
+          <p class="page-subtitle">Invoices blocked from posting. Open a row to correct fields and decide.</p>
         </div>
       </div>
-      <div class="section-card">
-        ${exceptions.length ? exceptions.map((invoice) => `
-          <button class="list-item exception-row" data-invoice-id="${invoice.id}" type="button">
-            <div style="display:flex; justify-content:space-between; gap:12px; width:100%;">
+      <div class="worklist">
+        ${exceptions.length ? exceptions.map((invoice) => {
+          const blockers = failedChecks(invoice);
+          const reason = invoice.issue || (blockers.length ? blockers.slice(0, 2).join(' · ') : 'Needs review');
+          const money = invoice.currency === 'INR' ? null : formatMoney;
+          const amount = money ? money(invoice.amount || 0) : `Rs ${Number(invoice.amount || 0).toLocaleString('en-IN')}`;
+          return `
+            <button class="worklist-row" data-invoice-id="${invoice.id}" type="button">
               <div>
-                <div style="font-weight:600; color: var(--heading);">${invoice.vendor || 'Unknown vendor'}</div>
-                <div style="color: var(--muted); font-size: 0.85rem;">${invoice.invoiceNumber || 'N/A'} • ${invoice.issue || 'Needs review'}</div>
+                <strong>${invoice.vendor || 'Unknown vendor'}</strong>
+                <div style="color: var(--muted); font-size: 0.85rem; margin-top: 4px;">${invoice.invoiceNumber || 'N/A'} · ${reason}</div>
               </div>
-              <div style="text-align:right;">
-                <div style="font-weight:600;">${formatMoney(invoice.amount || 0)}</div>
-                <span class="badge ${getStatusClass(invoice.status)}">${humanizeStatus(invoice.status)}</span>
-              </div>
-            </div>
-          </button>
-        `).join('') : `<div class="empty-state"><div class="empty-state-title">No exceptions</div><div class="empty-state-text">Auto-post and review gates are clear.</div></div>`}
+              <div>${amount}</div>
+              <div>${invoice.confidence ?? 0}% confidence</div>
+              <span class="badge ${getStatusClass(invoice.status)}">${humanizeStatus(invoice.status)}</span>
+            </button>
+          `;
+        }).join('') : `<div class="empty-state"><div class="empty-state-title">Queue is clear</div><div class="empty-state-text">Nothing needs a human decision. New uploads land here when matching fails a hard gate.</div></div>`}
       </div>
     </div>
   `;
 
-  appView.querySelectorAll('.exception-row').forEach((row) => {
+  appView.querySelectorAll('.worklist-row').forEach((row) => {
     row.addEventListener('click', () => {
       state.selectedInvoiceId = row.dataset.invoiceId;
       state.currentView = 'invoice-detail';
