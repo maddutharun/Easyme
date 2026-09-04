@@ -21,6 +21,7 @@ const { validateFileSignature } = require('./src/services/file-security.service'
 const { APPROVAL_ROLES } = require('../services/posting.service');
 
 const APP_VERSION = 'ai-ap-invoice-v1.0.0';
+const APP_BUILD = 'premium-login';
 const AI_MODEL_VERSION = 'local-rule-v1';
 const RULE_VERSION = 'invoice-rules-v1';
 const RECOMMENDATION_VERSION = 'recommendation-v1';
@@ -222,9 +223,32 @@ function metricsSnapshot() {
   };
 }
 
+function sendFrontendIndex(_req, res) {
+  res.set('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
+  res.set('Pragma', 'no-cache');
+  res.set('Expires', '0');
+  return res.sendFile(path.join(frontendDir, 'index.html'));
+}
+
+app.get('/__build', (_req, res) => {
+  res.set('Cache-Control', 'no-store');
+  res.json({
+    build: APP_BUILD,
+    loginRequired: true,
+    title: 'EasyMe · Sign in',
+    branch: 'cursor/run-easyme-server-44a9',
+    demo: { email: 'finance@easyme.local', password: 'demo123' },
+    wrongServerIfYouSee: ['Ari R.', 'Finance Ops', 'EasyMe Invoice Intelligence', 'Today • 09:40']
+  });
+});
+
+app.get('/', sendFrontendIndex);
+app.get('/index.html', sendFrontendIndex);
+
 app.use(express.static(frontendDir, {
   etag: false,
   lastModified: false,
+  index: false,
   setHeaders(res) {
     res.set('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
     res.set('Pragma', 'no-cache');
