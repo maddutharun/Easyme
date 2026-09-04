@@ -1,4 +1,13 @@
-  const parseMoney = (value) => Number(String(value ?? '').replaceAll(',', '').replace(/[₹$]/g, '')) || 0;
+const { STOP_LINE } = require('./extraction-refine.service');
+
+const parseMoney = (value) => {
+  const raw = String(value ?? '').trim();
+  if (!raw) return 0;
+  const negative = /^\(.*\)$/.test(raw) || raw.startsWith('-');
+  const numeric = Number(raw.replace(/[₹$(),]/g, '').replace(/[^0-9.]/g, ''));
+  if (!Number.isFinite(numeric)) return 0;
+  return negative ? -numeric : numeric;
+};
 
   const HEADER_PATTERN = /(?:sku|item\s*(?:code|no)|product\s*code|material\s*code|part\s*no|hsn|sac|description|qty|quantity|unit\s*price|rate|amount|taxable)/i;
 
@@ -15,23 +24,58 @@
 
 const parseLineItem = (line, continuation = '') => {
   const text = String(line || '').replace(/\s+/g, ' ').trim();
-  const fullText = `${text} ${continuation}`.trim();
-  const skuMatch = fullText.match(/(?:sku\s*id|sku|item\s*(?:code|no)|product\s*code|material\s*code|part\s*no|model\s*no|code)\s*[:#-]?\s*([A-Z0-9][A-Z0-9_.-]{2,})/i);
+  const fullText = `${text} ${continuation}`.replace(/\s+/g, ' ').trim();
+  const skuMatch = fullText.match(/(?:sku\s*id|sku|item\s*(?:code|no)|product\s*code|material\s*code|part\s*no|model\s*no)\s*[:#-]?\s*([A-Z0-9][A-Z0-9_.-]{2,})/i);
   const isNumberedRow = /^\d+[.)]?\s+/.test(text);
   if (!isNumberedRow && !skuMatch) return null;
-  const hsnMatch = text.match(/\b(\d{6,8})\b/);
+  const hsnMatch = fullText.match(/\b(\d{4,8})\b(?!\s*%)/);
   const hsn = hsnMatch?.[1] || null;
-  const numericTail = hsnMatch ? text.slice(hsnMatch.index + hsnMatch[0].length) : '';
-  const numbers = [...numericTail.matchAll(/(?:₹|rs\.?|inr|usd|\$)?\s*([\d,]+(?:\.\d{1,2})?)/gi)].map((match) => parseMoney(match[1]));
-  if (!hsn || numbers.length < 3) return null;
-  const quantity = numbers[0] || 0;
-  const unitPrice = numbers[1] || 0;
-  const amount = numbers[2] || 0;
-  const description = text.slice(text.indexOf('.') + 1, hsnMatch.index).replace(/[\d,]+(?:\.\d{1,2})?/g, ' ').replace(/\b(?:pcs|pc|nos|units?)\b/gi, '').replace(/\s+/g, ' ').trim();
-  const sku = skuMatch?.[1] || null;
-  const gstRate = text.match(/(?:gst|tax)\s*(?:rate)?\s*[:=]?\s*(\d+(?:\.\d+)?)\s*%/i)?.[1];
-  return { sku, description: description || null, hsnCode: hsn, quantity, unitPrice, taxableAmount: amount || quantity * unitPrice, amount: amount || quantity * unitPrice, gstRate: gstRate ? Number(gstRate) : null };
+  const numericSource = hsnMatch ? fullText.slice(hsnMatch.index + hsnMatch[0].length) : fullText;
+  const numbers = [...numericSource.matchAll(/(?:₹|rs\.?|inr|usd|\$)?\s*([\d,]+(?:\.\d{1,2})?)/gi)]
+    .map((match) => parseMoney(match[1]))
+    .filter((value) => Number.isFinite(value));
+  const assigned = assignQtyRateAmount(numbers, hsn);
+  if (!assigned) return null;
+  const hsnIndex = hsnMatch ? text.indexOf(hsnMatch[1]) : -1;
+  const description = (hsnIndex > 0 ? text.slice(text.search(/\s/) + 1, hsnIndex) : text.replace(/^\d+[.)]?\s+/, ''))
+    .replace(/\b(?:sku|item\s*(?:code|no))\s*[:#-]?\s*[A-Z0-9_.-]+/ig, ' ')
+    .replace(/[\d,]+(?:\.\d{1,2})?/g, ' ')
+    .replace(/\b(?:pcs|pc|nos|units?)\b/gi, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const sku = skuMatch?.[1] && !/^\d+$/.test(skuMatch[1]) ? skuMatch[1] : null;
+  const gstRate = fullText.match(/(?:gst|tax)\s*(?:rate)?\s*[:=]?\s*(\d+(?:\.\d+)?)\s*%/i)?.[1];
+  return {
+    sku,
+    description: description || null,
+    hsnCode: hsn && hsn.length >= 6 ? hsn : hsn,
+    quantity: assigned.quantity,
+    unitPrice: assigned.unitPrice,
+    taxableAmount: assigned.amount,
+    amount: assigned.amount,
+    gstRate: gstRate ? Number(gstRate) : null
+  };
 };
+
+function assignQtyRateAmount(numbers, hsn) {
+  const values = numbers.filter((value) => value > 0);
+  if (hsn && values.length >= 3) {
+    return { quantity: values[0], unitPrice: values[1], amount: values[2] };
+  }
+  if (values.length >= 3) {
+    for (let index = 0; index <= values.length - 3; index += 1) {
+      const quantity = values[index];
+      const unitPrice = values[index + 1];
+      const amount = values[index + 2];
+      const expected = quantity * unitPrice;
+      if (Math.abs(expected - amount) <= Math.max(1, amount * 0.02)) {
+        return { quantity, unitPrice, amount };
+      }
+    }
+    return null;
+  }
+  return null;
+}
 
 const deduplicateDocumentText = (text) => {
   const pages = String(text || '').split(/\f|(?=GSTIN\s*[:])/i).map((page) => page.trim()).filter(Boolean);
@@ -40,16 +84,33 @@ const deduplicateDocumentText = (text) => {
 };
 
 const extractLineItems = (text) => {
-  const lines = String(text || '').split(/\r?\n/).map((line) => line.replace(/\s+/g, ' ').trim()).filter(Boolean);
+  const lines = normalizeInvoiceLines(text);
   const items = [];
   for (let index = 0; index < lines.length; index += 1) {
-    if (!/^\d+[.)]?\s+/.test(lines[index])) continue;
+    const line = lines[index];
+    const numbered = /^\d+[.)]?\s+/.test(line);
+    const skuLine = /\b(?:sku|item\s*(?:code|no)|product\s*code)\b/i.test(line);
+    if (!numbered && !skuLine) continue;
     const continuation = [];
-    for (let next = index + 1; next < lines.length && !/^\d+[.)]?\s+/.test(lines[next]); next += 1) continuation.push(lines[next]);
-    const item = parseLineItem(lines[index], continuation.join(' '));
+    for (let next = index + 1; next < lines.length; next += 1) {
+      if (/^\d+[.)]?\s+/.test(lines[next])) break;
+      if (STOP_LINE.test(lines[next])) break;
+      continuation.push(lines[next]);
+    }
+    const item = parseLineItem(line, continuation.join(' '));
     if (item) items.push(item);
   }
-  return items;
+  return dedupeLineItems(items);
+};
+
+const dedupeLineItems = (items) => {
+  const seen = new Set();
+  return items.filter((item) => {
+    const key = [item.sku, item.hsnCode, item.quantity, item.amount].join('|');
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 };
 
 const extractLineItemsFromLayout = (layout) => {
@@ -62,7 +123,7 @@ const extractLineItemsFromLayout = (layout) => {
       if (parsed) items.push(parsed);
     }
   }
-  return items;
+  return dedupeLineItems(items);
 };
 
 const detectTemplate = (text) => {
