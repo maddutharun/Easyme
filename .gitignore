@@ -1,0 +1,7 @@
+node_modules/
+.env
+uploads/
+data/
+.DS_Store
+COMPLETE_CODE.md
+SOURCE_ONLY_CODE.md

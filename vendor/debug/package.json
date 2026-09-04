@@ -1,0 +1,11 @@
+{
+  "name": "debug",
+  "version": "2.6.9",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./src/node.js": "./index.js",
+    "./src/browser.js": "./index.js",
+    "./src/common.js": "./index.js"
+  }
+}

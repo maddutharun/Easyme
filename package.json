@@ -1,0 +1,33 @@
+{
+  "name": "invoice-intelligence-hub",
+  "version": "1.0.0",
+  "private": true,
+  "description": "AI-assisted invoice validation, ERP matching, and exception review workspace",
+  "main": "server.js",
+  "scripts": {
+    "dev": "node --watch server.js",
+    "start": "node server.js",
+    "postinstall": "node scripts/repair-dependencies.js",
+    "test": "node --test tests/unit/*.test.js tests/invoice-processing.test.js",
+    "worker": "node backend/src/workers/invoice.worker.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@tanstack/react-query": "^5.102.8",
+    "canvas": "^3.2.3",
+    "cors": "^2.8.6",
+    "dotenv": "^17.4.2",
+    "express": "4.21.2",
+    "helmet": "^8.3.0",
+    "multer": "^2.0.2",
+    "pdfjs-dist": "^6.2.108",
+    "sqlite3": "^6.0.1",
+    "tesseract.js": "^7.0.0",
+    "xlsx": "^0.18.5"
+  },
+  "overrides": {
+    "debug": "file:vendor/debug"
+  }
+}

@@ -1,0 +1,485 @@
+/**
+ * Integration Styles
+ * Styles for Query Client, Charts, Uppy, PDF Viewer, and Socket.io components
+ */
+
+/* ===== UPPY FILE UPLOAD ===== */
+.uppy-upload-zone {
+  border: 2px dashed #3498db;
+  border-radius: 12px;
+  padding: 40px 20px;
+  text-align: center;
+  cursor: pointer;
+  transition: all 0.3s ease;
+  background: linear-gradient(135deg, rgba(52, 152, 219, 0.05) 0%, rgba(52, 152, 219, 0.02) 100%);
+}
+
+.uppy-upload-zone:hover {
+  border-color: #2980b9;
+  background: linear-gradient(135deg, rgba(52, 152, 219, 0.1) 0%, rgba(52, 152, 219, 0.05) 100%);
+}
+
+.uppy-upload-zone.uppy-active {
+  border-color: #2ecc71;
+  background: linear-gradient(135deg, rgba(46, 204, 113, 0.1) 0%, rgba(46, 204, 113, 0.05) 100%);
+  transform: scale(1.02);
+}
+
+.uppy-icon {
+  font-size: 48px;
+  margin-bottom: 16px;
+  display: block;
+}
+
+.uppy-upload-zone h2 {
+  margin: 0 0 8px 0;
+  font-size: 18px;
+  color: #2c3e50;
+  font-weight: 600;
+}
+
+.uppy-upload-zone p {
+  margin: 0 0 20px 0;
+  color: #7f8c8d;
+  font-size: 14px;
+}
+
+.uppy-browse-btn {
+  background: linear-gradient(135deg, #3498db 0%, #2980b9 100%);
+  color: white;
+  border: none;
+  padding: 12px 32px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-weight: 600;
+  transition: all 0.3s ease;
+}
+
+.uppy-browse-btn:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 16px rgba(52, 152, 219, 0.3);
+}
+
+.uppy-progress {
+  margin-top: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.uppy-file-progress {
+  background: white;
+  border: 1px solid #ecf0f1;
+  border-radius: 8px;
+  padding: 12px;
+  transition: all 0.3s ease;
+}
+
+.uppy-file-progress.uppy-success {
+  background: #f0fdf4;
+  border-color: #86efac;
+}
+
+.uppy-file-progress.uppy-error {
+  background: #fef2f2;
+  border-color: #fecaca;
+}
+
+.uppy-file-name {
+  font-weight: 600;
+  font-size: 14px;
+  margin-bottom: 8px;
+  color: #2c3e50;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.uppy-progress-bar {
+  height: 6px;
+  background: #ecf0f1;
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.uppy-progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #3498db, #2980b9);
+  transition: width 0.3s ease;
+  border-radius: 3px;
+}
+
+.uppy-progress-text {
+  font-size: 12px;
+  color: #7f8c8d;
+  text-align: right;
+}
+
+/* ===== CHARTS ===== */
+.chart-container {
+  background: white;
+  border-radius: 12px;
+  padding: 20px;
+  margin-bottom: 20px;
+  border: 1px solid #ecf0f1;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
+}
+
+.chart-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+.chart-header h3 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  color: #2c3e50;
+}
+
+.chart-menu {
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  font-size: 18px;
+  color: #95a5a6;
+  transition: color 0.3s ease;
+}
+
+.chart-menu:hover {
+  color: #3498db;
+}
+
+.chart-wrapper {
+  position: relative;
+  min-height: 300px;
+  background: linear-gradient(135deg, rgba(52, 152, 219, 0.02) 0%, rgba(52, 152, 219, 0.01) 100%);
+  border-radius: 8px;
+  padding: 16px;
+}
+
+.chart-wrapper canvas {
+  max-width: 100%;
+}
+
+/* ===== PDF VIEWER ===== */
+.pdf-viewer {
+  display: flex;
+  flex-direction: column;
+  background: #f5f7fa;
+  border-radius: 12px;
+  overflow: hidden;
+  border: 1px solid #ecf0f1;
+  height: 100%;
+}
+
+.pdf-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  background: white;
+  border-bottom: 1px solid #ecf0f1;
+  flex-wrap: wrap;
+}
+
+.pdf-btn {
+  background: transparent;
+  border: 1px solid #ecf0f1;
+  padding: 6px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  color: #2c3e50;
+  transition: all 0.3s ease;
+}
+
+.pdf-btn:hover {
+  background: #3498db;
+  color: white;
+  border-color: #3498db;
+}
+
+.pdf-separator {
+  width: 1px;
+  height: 24px;
+  background: #ecf0f1;
+}
+
+.pdf-page-info {
+  font-size: 12px;
+  color: #7f8c8d;
+  font-weight: 500;
+}
+
+.pdf-zoom-level {
+  font-size: 12px;
+  color: #7f8c8d;
+  font-weight: 500;
+}
+
+.pdf-canvas-wrapper {
+  flex: 1;
+  overflow: auto;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding: 16px;
+  background: #f5f7fa;
+}
+
+.pdf-canvas {
+  border-radius: 4px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+}
+
+.pdf-error {
+  padding: 20px;
+  text-align: center;
+  color: #e74c3c;
+  font-weight: 600;
+}
+
+/* ===== SOCKET.IO REAL-TIME NOTIFICATIONS ===== */
+.realtime-notifications {
+  position: fixed;
+  top: 20px;
+  right: 20px;
+  z-index: 9999;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-width: 400px;
+  pointer-events: none;
+}
+
+.realtime-notification {
+  background: white;
+  border-radius: 8px;
+  padding: 16px;
+  border-left: 4px solid #3498db;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  pointer-events: auto;
+  animation: slideIn 0.3s ease;
+}
+
+@keyframes slideIn {
+  from {
+    transform: translateX(400px);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+.realtime-notification.notification-success {
+  border-left-color: #2ecc71;
+}
+
+.realtime-notification.notification-warning {
+  border-left-color: #f39c12;
+}
+
+.realtime-notification.notification-error {
+  border-left-color: #e74c3c;
+}
+
+.realtime-notification.notification-info {
+  border-left-color: #3498db;
+}
+
+.notification-content strong {
+  display: block;
+  color: #2c3e50;
+  font-size: 14px;
+  margin-bottom: 4px;
+}
+
+.notification-content p {
+  margin: 0;
+  color: #7f8c8d;
+  font-size: 13px;
+}
+
+.notification-close {
+  background: transparent;
+  border: none;
+  color: #95a5a6;
+  cursor: pointer;
+  font-size: 20px;
+  line-height: 1;
+  flex-shrink: 0;
+  transition: color 0.3s ease;
+}
+
+.notification-close:hover {
+  color: #e74c3c;
+}
+
+/* ===== PRESENCE INDICATOR ===== */
+#presenceIndicator {
+  background: white;
+  border-radius: 8px;
+  padding: 12px;
+  border: 1px solid #ecf0f1;
+  font-size: 12px;
+}
+
+.presence-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #ecf0f1;
+}
+
+.presence-title {
+  font-weight: 600;
+  color: #2c3e50;
+}
+
+.presence-count {
+  background: #3498db;
+  color: white;
+  padding: 2px 8px;
+  border-radius: 12px;
+  font-weight: 600;
+  font-size: 11px;
+}
+
+.presence-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.presence-user {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #2c3e50;
+}
+
+.presence-dot {
+  width: 8px;
+  height: 8px;
+  background: #2ecc71;
+  border-radius: 50%;
+  display: inline-block;
+  animation: pulse 2s infinite;
+}
+
+@keyframes pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}
+
+/* ===== LOADING STATES ===== */
+.loading-skeleton {
+  background: linear-gradient(90deg, #f0f0f0 25%, #e0e0e0 50%, #f0f0f0 75%);
+  background-size: 200% 100%;
+  animation: loading 1.5s infinite;
+  border-radius: 4px;
+}
+
+@keyframes loading {
+  0% {
+    background-position: 200% 0;
+  }
+  100% {
+    background-position: -200% 0;
+  }
+}
+
+.optimistic-update {
+  opacity: 0.7;
+  pointer-events: none;
+}
+
+.optimistic-update::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.5), transparent);
+  animation: shimmer 1.5s infinite;
+}
+
+@keyframes shimmer {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+/* ===== DARK MODE ===== */
+body.dark-mode .uppy-upload-zone {
+  border-color: #34495e;
+  background: rgba(52, 73, 94, 0.1);
+}
+
+body.dark-mode .uppy-upload-zone h2 {
+  color: #ecf0f1;
+}
+
+body.dark-mode .uppy-upload-zone p {
+  color: #95a5a6;
+}
+
+body.dark-mode .chart-container {
+  background: #2c3e50;
+  border-color: #34495e;
+}
+
+body.dark-mode .chart-header h3 {
+  color: #ecf0f1;
+}
+
+body.dark-mode .chart-wrapper {
+  background: rgba(52, 73, 94, 0.5);
+}
+
+body.dark-mode .pdf-viewer {
+  background: #34495e;
+}
+
+body.dark-mode .pdf-toolbar {
+  background: #2c3e50;
+  border-color: #34495e;
+}
+
+body.dark-mode .pdf-btn {
+  border-color: #34495e;
+  color: #ecf0f1;
+}
+
+body.dark-mode .realtime-notification {
+  background: #2c3e50;
+  border-color: #34495e;
+}
+
+body.dark-mode .notification-content strong {
+  color: #ecf0f1;
+}
+
+body.dark-mode .notification-content p {
+  color: #bdc3c7;
+}

@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>EasyMe Invoice Intelligence</title>
+    <meta name="description" content="Modern invoice intelligence and approval workspace" />
+    <link rel="stylesheet" href="/css/styles.css" />
+    <link rel="stylesheet" href="/css/enhancements.css" />
+    <link rel="stylesheet" href="/css/review-panel.css" />
+    <link rel="stylesheet" href="/css/integrations.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="topbar-brand">
+          <div class="brand-mark">E</div>
+          <div class="brand-copy">
+            <div class="brand-title">EasyMe</div>
+            <div class="brand-subtitle">Invoice Studio</div>
+          </div>
+          <button class="sidebar-toggle" id="sidebarToggle" aria-label="Toggle sidebar" title="Expand/Collapse">
+            <span class="toggle-icon">◄</span>
+          </button>
+        </div>
+
+        <nav class="nav" aria-label="Sidebar navigation">
+          <button class="nav-item" data-view="dashboard">Dashboard</button>
+          <button class="nav-item active" data-view="upload">Upload</button>
+          <button class="nav-item" data-view="invoices">Invoices</button>
+          <button class="nav-item" data-view="workflow">Workflow</button>
+          <button class="nav-item" data-view="exports">Exports</button>
+        </nav>
+
+        <div class="sidebar-footer">
+          <div class="mini-badge">Live Ops</div>
+          <div class="mini-metric">
+            <span>Approval queue</span>
+            <strong>12 items</strong>
+          </div>
+        </div>
+      </aside>
+
+      <main class="main-panel">
+        <header class="main-header">
+          <button class="menu-toggle-btn" id="menuToggle" aria-label="Toggle sidebar menu" title="Menu">☰</button>
+          <div class="search-wrap">
+            <span class="search-icon">⌕</span>
+            <input type="search" placeholder="Search invoices, vendors, status..." aria-label="Search invoices" />
+          </div>
+
+          <div class="header-actions">
+            <button class="icon-btn" aria-label="Notifications">🔔</button>
+            <button class="icon-btn" aria-label="Reports">📊</button>
+            <button class="theme-toggle-btn" id="themeToggle" aria-label="Toggle dark mode" title="Toggle dark mode">🌙</button>
+            <div class="profile-pill">
+              <div class="profile-avatar">AR</div>
+              <div class="profile-meta">
+                <span class="profile-name">Ari R.</span>
+                <span class="profile-role">Finance Ops</span>
+              </div>
+            </div>
+          </div>
+        </header>
+
+        <div id="appView" class="app-view"></div>
+        <div id="toastContainer" class="toast-container"></div>
+      </main>
+    </div>
+
+    <script type="module" src="/js/app.js"></script>
+  </body>
+</html>
