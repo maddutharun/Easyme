@@ -8,7 +8,7 @@ const matchingPolicy = {
 
 const uploadPolicy = {
   maxSizeMb: 10,
-  supportedTypes: ['PDF', 'PNG', 'JPG', 'XLS', 'XLSX']
+  supportedTypes: ['PDF', 'PNG', 'JPG', 'TIFF', 'XLS', 'XLSX']
 };
 
 const allowedInvoiceMimeTypes = new Set([
@@ -16,10 +16,11 @@ const allowedInvoiceMimeTypes = new Set([
   'image/png',
   'image/jpeg',
   'image/jpg',
+  'image/tiff',
   'application/vnd.ms-excel',
   'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
 ]);
 
-const allowedInvoiceExtensions = new Set(['.pdf', '.png', '.jpg', '.jpeg', '.xls', '.xlsx']);
+const allowedInvoiceExtensions = new Set(['.pdf', '.png', '.jpg', '.jpeg', '.tif', '.tiff', '.xls', '.xlsx']);
 
 module.exports = { matchingPolicy, uploadPolicy, allowedInvoiceMimeTypes, allowedInvoiceExtensions };

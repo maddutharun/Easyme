@@ -7,7 +7,7 @@ import { renderDashboardPage as renderDashboardModule } from './pages/dashboard.
 import { renderExportsPage as renderExportsModule } from './pages/exports.js';
 import { renderWorkflowPage as renderWorkflowModule } from './pages/workflow.js';
 import { renderExceptionsPage } from './pages/exceptions.js';
-import { renderInvoiceDetailPage as renderInvoiceDetailModule } from './pages/review.js';
+import { renderInvoiceDetailPage as renderInvoiceDetailModule } from './pages/review.js?v=sage7';
 import {
   setupThemeToggle,
   showToastNotification,
@@ -39,6 +39,7 @@ function toggleDarkMode() {
   state.darkMode = !state.darkMode;
   document.body.classList.toggle('dark-mode', state.darkMode);
   localStorage.setItem('darkMode', state.darkMode);
+  localStorage.setItem('theme', state.darkMode ? 'dark' : 'light');
 }
 
 function pushHistory() {
@@ -79,6 +80,16 @@ function toggleSidebarCollapse() {
   document.querySelector('.sidebar').classList.toggle('collapsed', state.sidebarCollapsed);
 }
 
+function navigateTo(view) {
+  if (!view) return;
+  state.currentView = view;
+  if (view === 'invoices') {
+    state.filterStatus = 'all';
+    state.searchQuery = '';
+  }
+  renderView();
+}
+
 function setupKeyboardShortcuts() {
   document.addEventListener('keydown', (e) => {
     if (e.ctrlKey || e.metaKey) return;
@@ -105,7 +116,18 @@ async function loadInvoices() {
       apiFetch('/api/audit'),
       apiFetch('/api/metrics')
     ]);
-    if (summaryResponse.status === 401) return;
+    if (summaryResponse.status === 401) {
+      state.invoices = [];
+      state.audit = [];
+      state.metrics = { total: 0, posted: 0, exceptions: 0 };
+      showLogin(true);
+      showToast('Your session expired. Please sign in again.', 'info');
+      return;
+    }
+    if (!summaryResponse.ok) {
+      const failure = await summaryResponse.json().catch(() => ({}));
+      throw new Error(failure.error || `Invoice loading failed (${summaryResponse.status})`);
+    }
     const summary = await summaryResponse.json();
     const auditPayload = auditResponse.ok ? await auditResponse.json() : { audit: [] };
     const metricsPayload = metricsResponse.ok ? await metricsResponse.json() : { metrics: {} };
@@ -133,8 +155,8 @@ function validateSelectedFile(file) {
     return { valid: false, message: 'Unsupported file type. Please upload PDF, PNG, JPG, TIFF, XLSX, or XLS.' };
   }
 
-  if (file.size > 100 * 1024 * 1024) {
-    return { valid: false, message: 'File is too large. Please keep each invoice under 100 MB.' };
+  if (file.size > 10 * 1024 * 1024) {
+    return { valid: false, message: 'File is too large. Please keep each invoice under 10 MB.' };
   }
 
   return { valid: true };
@@ -265,10 +287,18 @@ function renderUploadPage() {
       }
 
       state.selectedInvoiceId = data.invoice.id;
-      state.currentView = 'invoices';
-      await loadInvoices();
+      state.activeFile = null;
       state.currentView = 'invoice-detail';
-      renderInvoiceDetailPage(data.invoice);
+      const existingIndex = state.invoices.findIndex((item) => item.id === data.invoice.id);
+      if (existingIndex >= 0) state.invoices[existingIndex] = data.invoice;
+      else state.invoices.unshift(data.invoice);
+      refreshChrome();
+      renderView();
+      await loadInvoices();
+      const processedInvoice = state.invoices.find((item) => item.id === data.invoice.id) || data.invoice;
+      state.selectedInvoiceId = processedInvoice.id;
+      renderInvoiceDetailPage(processedInvoice);
+      showToast('Invoice processed and ready to review', 'success');
     } catch (error) {
       const message = error?.name === 'AbortError'
         ? 'Upload timed out. The server may be busy or unreachable.'
@@ -394,6 +424,7 @@ function renderInvoicesPage() {
           <span>Date</span>
           <span>Amount</span>
           <span>Confidence</span>
+          <span>Status</span>
           <span>Open</span>
         </div>
         ${filteredRows.length ? filteredRows.map((invoice) => `
@@ -452,6 +483,21 @@ function renderInvoicesPage() {
     checkbox.addEventListener('click', (event) => {
       event.stopPropagation();
       toggleInvoiceSelection(checkbox.dataset.invoiceId);
+    });
+  });
+
+  document.querySelectorAll('.table-row[data-invoice-id]').forEach((row) => {
+    row.addEventListener('click', () => {
+      const item = state.invoices.find((invoice) => invoice.id === row.dataset.invoiceId);
+      if (!item) return;
+      state.selectedInvoiceId = item.id;
+      state.currentView = 'invoice-detail';
+      renderInvoiceDetailPage(item);
+    });
+    row.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter' && event.key !== ' ') return;
+      event.preventDefault();
+      row.click();
     });
   });
 
@@ -552,6 +598,7 @@ function renderPlaceholderPage(view) {
 }
 
 function renderView() {
+  state.darkMode = localStorage.getItem('darkMode') === 'true' || localStorage.getItem('theme') === 'dark';
   document.body.classList.toggle('dark-mode', state.darkMode);
   refreshFloatingActions();
   renderNav();
@@ -593,10 +640,7 @@ function renderView() {
 }
 
 document.querySelectorAll('.nav-item').forEach((button) => {
-  button.addEventListener('click', () => {
-    state.currentView = button.dataset.view;
-    renderView();
-  });
+  button.addEventListener('click', () => navigateTo(button.dataset.view));
 });
 
 // Initialize dark mode
@@ -745,6 +789,10 @@ document.getElementById('loginForm')?.addEventListener('submit', async (event) =
   const email = form.email.value;
   const password = form.password.value;
   const errorEl = document.getElementById('loginError');
+  const submitButton = form.querySelector('.login-submit');
+  const submitLabel = submitButton?.querySelector('.login-submit-label');
+  if (submitButton) submitButton.disabled = true;
+  if (submitLabel) submitLabel.textContent = 'Signing in…';
   try {
     const response = await fetch('/api/auth/login', {
       method: 'POST',
@@ -760,6 +808,8 @@ document.getElementById('loginForm')?.addEventListener('submit', async (event) =
     await loadInvoices();
     showToast(`Signed in as ${data.user.name}`, 'success');
   } catch (error) {
+    if (submitButton) submitButton.disabled = false;
+    if (submitLabel) submitLabel.textContent = 'Continue';
     if (errorEl) {
       errorEl.hidden = false;
       errorEl.textContent = error.message;
@@ -797,9 +847,10 @@ document.getElementById('accountMenu')?.addEventListener('click', async (event) 
     showToast(`Now acting as ${data.user.name}`, 'success');
     return;
   }
-  if (event.target.id === 'signOutButton') {
+  if (event.target.closest('#signOutButton')) {
     clearSession();
     document.getElementById('accountMenu')?.classList.remove('open');
+    document.getElementById('profilePill')?.setAttribute('aria-expanded', 'false');
     showLogin(true);
     showToast('Signed out', 'info');
   }

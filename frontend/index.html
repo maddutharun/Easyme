@@ -6,17 +6,17 @@
     <meta http-equiv="Cache-Control" content="no-store" />
     <title>EasyMe · Sign in · premium-login</title>
     <!-- BUILD premium-login: if the browser title is "EasyMe Invoice Intelligence" you are not on this file. -->
-    <link rel="stylesheet" href="/css/styles.css?v=premium4" />
-    <link rel="stylesheet" href="/css/enhancements.css?v=premium4" />
-    <link rel="stylesheet" href="/css/review-panel.css?v=premium4" />
-    <link rel="stylesheet" href="/css/integrations.css?v=premium4" />
-    <link rel="stylesheet" href="/css/premium.css?v=premium4" />
+    <link rel="stylesheet" href="/css/styles.css?v=sage7" />
+    <link rel="stylesheet" href="/css/enhancements.css?v=sage7" />
+    <link rel="stylesheet" href="/css/review-panel.css?v=sage7" />
+    <link rel="stylesheet" href="/css/integrations.css?v=sage7" />
+    <link rel="stylesheet" href="/css/premium.css?v=sage7" />
     <style>
       body:not(.is-authed) .app-shell { visibility: hidden; pointer-events: none; }
       .login-gate {
         position: fixed; inset: 0; z-index: 9999;
         display: grid; place-items: center;
-        background: #07111f;
+        background: #57534E;
       }
       .login-gate.hidden { display: none !important; }
       .file-input {
@@ -27,10 +27,12 @@
   <body>
     <div id="loginGate" class="login-gate" role="dialog" aria-modal="true" aria-labelledby="loginTitle">
       <form id="loginForm" class="login-card">
-        <div class="login-kicker">EasyMe · build premium-login</div>
+        <div class="login-kicker">EasyMe · accounts payable</div>
         <h1 id="loginTitle">Sign in to review and post</h1>
         <p>Exception review, matching evidence, and ERP posting in one workspace.</p>
-        <p class="login-hint">If you see a dashboard for Ari R. instead of this screen, you are running the old <code>main</code> app on port 3000 — stop that process and start this branch.</p>
+        <div class="login-divider" aria-hidden="true"></div>
+        <p class="login-section-label">Choose a demo role</p>
+        <p class="login-section-help">Your role controls the actions available in the workspace.</p>
         <div class="role-chips" aria-label="Demo roles">
           <button type="button" class="role-chip" data-email="finance@easyme.local" aria-pressed="true">Finance · post</button>
           <button type="button" class="role-chip" data-email="manager@easyme.local" aria-pressed="false">Manager · review</button>
@@ -41,8 +43,8 @@
           <input id="loginPassword" name="password" type="password" autocomplete="current-password" required />
           <button type="button" id="togglePassword">Show</button>
         </label>
-        <button class="primary-button" type="submit">Continue</button>
-        <p class="login-hint">Password for every demo role is <strong>demo123</strong>.</p>
+        <button class="primary-button login-submit" type="submit"><span class="login-submit-label">Continue</span><span class="login-submit-loader" aria-hidden="true"></span></button>
+        <p class="login-hint">Demo password: <strong>demo123</strong></p>
         <div id="loginError" class="upload-status error" hidden></div>
       </form>
     </div>
@@ -61,12 +63,12 @@
         </div>
 
         <nav class="nav" aria-label="Sidebar navigation">
-          <button class="nav-item" data-view="exceptions">Exceptions</button>
-          <button class="nav-item" data-view="invoices">Invoices</button>
-          <button class="nav-item" data-view="upload">Upload</button>
-          <button class="nav-item" data-view="dashboard">Dashboard</button>
-          <button class="nav-item" data-view="workflow">Workflow</button>
-          <button class="nav-item" data-view="exports">Exports</button>
+          <button class="nav-item" data-view="exceptions" title="Exceptions">Exceptions</button>
+          <button class="nav-item" data-view="invoices" title="Invoices">Invoices</button>
+          <button class="nav-item" data-view="upload" title="Upload">Upload</button>
+          <button class="nav-item" data-view="dashboard" title="Dashboard">Dashboard</button>
+          <button class="nav-item" data-view="workflow" title="Workflow">Workflow</button>
+          <button class="nav-item" data-view="exports" title="Exports">Exports</button>
         </nav>
 
         <div class="sidebar-footer">
@@ -107,6 +109,6 @@
       </main>
     </div>
 
-    <script type="module" src="/js/app.js?v=premium4"></script>
+    <script type="module" src="/js/app.js?v=sage7"></script>
   </body>
 </html>
