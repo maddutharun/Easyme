@@ -3,18 +3,48 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>EasyMe Invoice Intelligence</title>
-    <meta name="description" content="Invoice matching, exception review, and ERP posting workspace" />
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@500&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
-    <link rel="stylesheet" href="/css/styles.css" />
-    <link rel="stylesheet" href="/css/enhancements.css" />
-    <link rel="stylesheet" href="/css/review-panel.css" />
-    <link rel="stylesheet" href="/css/integrations.css" />
-    <link rel="stylesheet" href="/css/premium.css" />
+    <meta http-equiv="Cache-Control" content="no-store" />
+    <title>EasyMe · Sign in</title>
+    <link rel="stylesheet" href="/css/styles.css?v=premium3" />
+    <link rel="stylesheet" href="/css/enhancements.css?v=premium3" />
+    <link rel="stylesheet" href="/css/review-panel.css?v=premium3" />
+    <link rel="stylesheet" href="/css/integrations.css?v=premium3" />
+    <link rel="stylesheet" href="/css/premium.css?v=premium3" />
+    <style>
+      body:not(.is-authed) .app-shell { visibility: hidden; pointer-events: none; }
+      .login-gate {
+        position: fixed; inset: 0; z-index: 9999;
+        display: grid; place-items: center;
+        background: #07111f;
+      }
+      .login-gate.hidden { display: none !important; }
+      .file-input {
+        position: absolute; width: 1px; height: 1px; opacity: 0; overflow: hidden;
+      }
+    </style>
   </head>
   <body>
+    <div id="loginGate" class="login-gate" role="dialog" aria-modal="true" aria-labelledby="loginTitle">
+      <form id="loginForm" class="login-card">
+        <div class="login-kicker">EasyMe</div>
+        <h1 id="loginTitle">Sign in to review and post</h1>
+        <p>Exception review, matching evidence, and ERP posting in one workspace.</p>
+        <div class="role-chips" aria-label="Demo roles">
+          <button type="button" class="role-chip" data-email="finance@easyme.local" aria-pressed="true">Finance · post</button>
+          <button type="button" class="role-chip" data-email="manager@easyme.local" aria-pressed="false">Manager · review</button>
+          <button type="button" class="role-chip" data-email="clerk@easyme.local" aria-pressed="false">Clerk · query</button>
+        </div>
+        <label>Email<input id="loginEmail" name="email" type="email" value="finance@easyme.local" autocomplete="username" required /></label>
+        <label class="password-row">Password
+          <input id="loginPassword" name="password" type="password" autocomplete="current-password" required />
+          <button type="button" id="togglePassword">Show</button>
+        </label>
+        <button class="primary-button" type="submit">Continue</button>
+        <p class="login-hint">Password for every demo role is <strong>demo123</strong>.</p>
+        <div id="loginError" class="upload-status error" hidden></div>
+      </form>
+    </div>
+
     <div class="app-shell">
       <aside class="sidebar">
         <div class="topbar-brand">
@@ -72,29 +102,9 @@
 
         <div id="appView" class="app-view"></div>
         <div id="toastContainer" class="toast-container"></div>
-        <div id="loginGate" class="login-gate" role="dialog" aria-modal="true" aria-labelledby="loginTitle">
-          <form id="loginForm" class="login-card">
-            <div class="login-kicker">EasyMe</div>
-            <h1 id="loginTitle">Sign in to review and post</h1>
-            <p>Exception review, matching evidence, and ERP posting in one workspace.</p>
-            <div class="role-chips" aria-label="Demo roles">
-              <button type="button" class="role-chip" data-email="finance@easyme.local" aria-pressed="true">Finance · post</button>
-              <button type="button" class="role-chip" data-email="manager@easyme.local" aria-pressed="false">Manager · review</button>
-              <button type="button" class="role-chip" data-email="clerk@easyme.local" aria-pressed="false">Clerk · query</button>
-            </div>
-            <label>Email<input id="loginEmail" name="email" type="email" value="finance@easyme.local" autocomplete="username" required /></label>
-            <label class="password-row">Password
-              <input id="loginPassword" name="password" type="password" autocomplete="current-password" required />
-              <button type="button" id="togglePassword">Show</button>
-            </label>
-            <button class="primary-button" type="submit">Continue</button>
-            <p class="login-hint">Demo password is demo123. Finance can post; clerk cannot.</p>
-            <div id="loginError" class="upload-status error" hidden></div>
-          </form>
-        </div>
       </main>
     </div>
 
-    <script type="module" src="/js/app.js"></script>
+    <script type="module" src="/js/app.js?v=premium3"></script>
   </body>
 </html>

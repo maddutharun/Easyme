@@ -1037,6 +1037,7 @@ function refreshChrome() {
 
 function showLogin(visible) {
   document.getElementById('loginGate')?.classList.toggle('hidden', !visible);
+  document.body.classList.toggle('is-authed', !visible);
 }
 
 async function bootstrapSession() {
