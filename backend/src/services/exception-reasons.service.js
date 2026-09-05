@@ -1,6 +1,6 @@
 const GSTIN_PATTERN = /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$/;
 
-function collectExceptionReasons({ extracted = {}, comparison = {}, duplicate = false, vendor = null, invoices = [] } = {}) {
+function collectExceptionReasons({ extracted = {}, comparison = {}, duplicate = false, vendor = null, invoices = [], lineMatch = null, autoPost = null } = {}) {
   const reasons = [];
   if (extracted.readable === false) reasons.push('Document was not readable; extract fields from the paper copy.');
   if (duplicate) reasons.push('Duplicate file or invoice number for this vendor.');
@@ -12,6 +12,12 @@ function collectExceptionReasons({ extracted = {}, comparison = {}, duplicate = 
   }
   if (extracted.arithmeticValidation && extracted.arithmeticValidation.passed === false) {
     reasons.push('Line items, tax, and grand total do not tie out.');
+  }
+  if (lineMatch && lineMatch.passed === false) {
+    reasons.push('Invoice lines do not match PO quantity or amount within tolerance.');
+  }
+  if (autoPost && autoPost.eligible === false && autoPost.blockers?.includes('HIGH_VALUE')) {
+    reasons.push('Amount is above the high-value review threshold.');
   }
   const failed = (comparison.checks || []).filter((check) => !check.passed);
   for (const check of failed.slice(0, 4)) {

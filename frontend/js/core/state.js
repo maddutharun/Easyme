@@ -14,5 +14,6 @@ export const state = {
   showOnboarding: localStorage.getItem('onboarded') !== 'true',
   user: null,
   metrics: { total: 0, posted: 0, exceptions: 0 },
+  queueJobs: [],
   audit: []
 };

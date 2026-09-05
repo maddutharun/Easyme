@@ -117,6 +117,15 @@ export function renderInvoiceDetailPage({ appView, invoice, state, renderBreadcr
           <div class="check-list">
             ${checks.length ? checks.map((check) => `<div class="check-row"><div><strong>${escapeHtml(check.name)}</strong><div style="color:var(--muted);font-size:0.82rem;">${escapeHtml(check.detail || '')}</div></div><span class="badge ${check.passed ? 'badge-success' : 'badge-danger'}">${check.passed ? 'Pass' : 'Fail'}</span></div>`).join('') : '<div class="empty-state-text">Checks appear after matching.</div>'}
           </div>
+          ${invoice.lineMatch ? `<h4 style="margin: 20px 0 8px;">Line match (${escapeHtml(invoice.lineMatch.mode || '3-way')})</h4><div class="check-list">${(invoice.lineMatch.lines || []).length ? invoice.lineMatch.lines.map((line) => `<div class="check-row"><div><strong>${escapeHtml(line.sku || line.hsnCode || 'Line')}</strong><div style="color:var(--muted);font-size:0.82rem;">${escapeHtml(line.reason || '')}</div></div><span class="badge ${line.matched ? 'badge-success' : 'badge-danger'}">${line.matched ? 'Match' : 'Gap'}</span></div>`).join('') : `<div class="empty-state-text">${invoice.lineMatch.passed == null ? 'No invoice lines to match; header 2-way/3-way still applies.' : 'No line rows.'}</div>`}</div>` : ''}
+          ${invoice.autoPost ? `<p style="margin-top:12px; color: var(--muted); font-size:0.85rem;">Auto-post: ${escapeHtml(invoice.autoPost.summary || (invoice.autoPost.eligible ? 'eligible' : 'blocked'))}. Execute stays off unless AUTO_POST_EXECUTE is set.</p>` : ''}
+          <h4 style="margin: 20px 0 8px;">Vendor query</h4>
+          <div class="check-list" style="margin-bottom:8px;">
+            ${((invoice.vendorQuery && invoice.vendorQuery.thread) || []).length
+              ? invoice.vendorQuery.thread.map((entry) => `<div class="check-row"><div><strong>${escapeHtml(entry.actor || 'AP')}</strong><div style="color:var(--muted);font-size:0.82rem;">${escapeHtml(entry.message || '')}</div></div></div>`).join('')
+              : '<div class="empty-state-text">No vendor thread yet. Query vendor to request evidence.</div>'}
+          </div>
+          ${canPerform('query') ? `<form id="vendorQueryForm" style="display:grid; gap:8px; margin-bottom:12px;"><textarea name="message" rows="2" placeholder="Ask the vendor for PO, tax, or bank confirmation" required></textarea><button class="secondary-button" type="submit">Send vendor query</button></form>` : ''}
           ${invoice.aiSummary ? `<p style="margin-top:16px; color: var(--heading);">${escapeHtml(invoice.aiSummary)}</p>` : ''}
           ${canPerform('approve') ? `
             <form id="feedbackForm" style="margin-top:16px; display:grid; gap:8px;">
@@ -180,6 +189,19 @@ export function renderInvoiceDetailPage({ appView, invoice, state, renderBreadcr
   document.getElementById('holdInvoiceButton')?.addEventListener('click', () => runAction('hold').catch((error) => showToast(error.message, 'error')));
   document.getElementById('rejectInvoiceButton')?.addEventListener('click', () => runAction('reject', { reason: 'Rejected in review workspace' }).catch((error) => showToast(error.message, 'error')));
   document.getElementById('queryInvoiceButton')?.addEventListener('click', () => runAction('query').catch((error) => showToast(error.message, 'error')));
+
+  document.getElementById('vendorQueryForm')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const message = new FormData(event.currentTarget).get('message');
+    const response = await apiFetch(`/api/invoices/${invoice.id}/vendor-query`, {
+      method: 'POST',
+      body: JSON.stringify({ message })
+    });
+    const data = await response.json();
+    if (!response.ok) return showToast(data.error || 'Query failed', 'error');
+    applyUpdated(data.invoice);
+    showToast('Vendor query sent', 'success');
+  });
 
   document.getElementById('recommendButton')?.addEventListener('click', async () => {
     const response = await apiFetch(`/api/invoices/${invoice.id}/recommendation`, { method: 'POST', body: '{}' });

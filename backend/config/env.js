@@ -21,7 +21,20 @@ const config = {
   DOCUMENT_AI_SEND_FILE: process.env.DOCUMENT_AI_SEND_FILE === 'true',
   LOG_LEVEL: process.env.LOG_LEVEL || 'info',
   TRUST_PROXY: process.env.TRUST_PROXY === 'true',
-  DEMO_MODE: !isProduction
+  DEMO_MODE: !isProduction,
+  AUTO_POST_ENABLED: process.env.AUTO_POST_ENABLED === 'true',
+  AUTO_POST_EXECUTE: process.env.AUTO_POST_EXECUTE === 'true',
+  INBOX_DIR: process.env.INBOX_DIR || path.join(__dirname, '..', 'inbox'),
+  INBOX_WATCH: process.env.INBOX_WATCH === 'true',
+  STORAGE_DRIVER: process.env.STORAGE_DRIVER || 'local',
+  OIDC_AUTHORIZE_URL: process.env.OIDC_AUTHORIZE_URL || '',
+  OIDC_CLIENT_ID: process.env.OIDC_CLIENT_ID || '',
+  OIDC_REDIRECT_URI: process.env.OIDC_REDIRECT_URI || '',
+  ERP_BASE_URL: process.env.ERP_BASE_URL || '',
+  CLAMAV_URL: process.env.CLAMAV_URL || '',
+  REDIS_URL: process.env.REDIS_URL || '',
+  S3_PUT_URL: process.env.S3_PUT_URL || '',
+  OIDC_SCOPE: process.env.OIDC_SCOPE || 'openid email profile'
 };
 
 if (isProduction && !process.env.JWT_SECRET) {

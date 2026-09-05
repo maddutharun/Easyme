@@ -30,7 +30,9 @@ const transactions = [
     description: 'Ergonomic monitor arms',
     glAccount: '620010',
     costCenter: 'IT001',
-    taxCode: 'GST18'
+    taxCode: 'GST18',
+    currency: 'USD',
+    lines: [{ sku: 'ARM-1', hsnCode: '998314', quantity: 120, unitPrice: 104, amount: 12480 }]
   },
   {
     po: 'PO-4500102',
@@ -42,7 +44,8 @@ const transactions = [
     description: 'Monitor arms',
     glAccount: '620010',
     costCenter: 'IT001',
-    taxCode: 'GST18'
+    taxCode: 'GST18',
+    lines: [{ sku: 'ARM-1', hsnCode: '998314', quantity: 80, unitPrice: 137.5, amount: 11000 }]
   },
   {
     po: 'PO-4500110',

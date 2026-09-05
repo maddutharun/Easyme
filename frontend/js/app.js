@@ -111,14 +111,16 @@ function setupKeyboardShortcuts() {
 
 async function loadInvoices() {
   try {
-    const [summaryResponse, auditResponse, metricsResponse] = await Promise.all([
+    const [summaryResponse, auditResponse, metricsResponse, queueResponse] = await Promise.all([
       apiFetch('/api/summary'),
       apiFetch('/api/audit'),
-      apiFetch('/api/metrics')
+      apiFetch('/api/metrics'),
+      apiFetch('/api/queue')
     ]);
     if (summaryResponse.status === 401) {
       state.invoices = [];
       state.audit = [];
+      state.queueJobs = [];
       state.metrics = { total: 0, posted: 0, exceptions: 0 };
       showLogin(true);
       showToast('Your session expired. Please sign in again.', 'info');
@@ -131,9 +133,11 @@ async function loadInvoices() {
     const summary = await summaryResponse.json();
     const auditPayload = auditResponse.ok ? await auditResponse.json() : { audit: [] };
     const metricsPayload = metricsResponse.ok ? await metricsResponse.json() : { metrics: {} };
+    const queuePayload = queueResponse.ok ? await queueResponse.json() : { jobs: [] };
     state.invoices = [...(summary.invoices || [])].sort((a, b) => new Date(b.date || '1970-01-01') - new Date(a.date || '1970-01-01'));
     state.audit = auditPayload.audit || [];
     state.metrics = metricsPayload.metrics || summary.metrics || {};
+    state.queueJobs = queuePayload.jobs || [];
     refreshChrome();
     if (!state.selectedInvoiceId && state.invoices.length) state.selectedInvoiceId = state.invoices[0].id;
     renderView();
@@ -148,11 +152,11 @@ function validateSelectedFile(file) {
     return { valid: false, message: 'No invoice file selected.' };
   }
 
-  const allowedExtensions = ['pdf', 'png', 'jpg', 'jpeg', 'tiff', 'xlsx', 'xls'];
+  const allowedExtensions = ['pdf', 'png', 'jpg', 'jpeg', 'tiff', 'xlsx', 'xls', 'json'];
   const ext = String(file.name || '').split('.').pop()?.toLowerCase();
 
   if (!allowedExtensions.includes(ext)) {
-    return { valid: false, message: 'Unsupported file type. Please upload PDF, PNG, JPG, TIFF, XLSX, or XLS.' };
+    return { valid: false, message: 'Unsupported file type. Please upload PDF, PNG, JPG, TIFF, XLSX, XLS, or JSON.' };
   }
 
   if (file.size > 10 * 1024 * 1024) {
@@ -182,7 +186,7 @@ function renderUploadPage() {
       <div class="page-header">
         <div>
           <h1 class="page-title">Upload Invoice</h1>
-          <p class="page-subtitle">PDF, JPG, PNG, or Excel files. Advanced OCR extraction with ERP validation.</p>
+          <p class="page-subtitle">PDF, image, Excel, or IRN JSON. Extraction then ERP matching.</p>
         </div>
       </div>
 
@@ -190,10 +194,10 @@ function renderUploadPage() {
         <label class="dropzone" for="uploadInput">
           <div class="dropzone-inner">
             <p class="upload-copy">Drop a PDF, image, or Excel file, or <strong>browse</strong></p>
-            <p class="upload-help">PDF, PNG, JPG, TIFF, XLSX — 10 MB max for matching</p>
+            <p class="upload-help">PDF, PNG, JPG, TIFF, XLSX, JSON — 10 MB max</p>
           </div>
         </label>
-        <input id="uploadInput" class="file-input" type="file" accept=".pdf,.png,.jpg,.jpeg,.xlsx,.xls,.tiff" />
+        <input id="uploadInput" class="file-input" type="file" accept=".pdf,.png,.jpg,.jpeg,.xlsx,.xls,.tiff,.json" />
       </div>
 
       ${selectedFile ? `
@@ -224,7 +228,7 @@ function renderUploadPage() {
       <div class="section-card" style="margin-top: 28px;">
         <h3 style="margin: 0 0 12px 0; color: var(--heading);">Accepted sources</h3>
         <p style="margin: 0; color: var(--muted); font-size: 0.9rem;">
-          Text PDFs extract immediately. Images use OCR. Spreadsheets map vendor, amount, tax, and PO columns.
+          Text PDFs extract immediately. Images use OCR. Spreadsheets map vendor, amount, tax, and PO columns. IRN JSON skips OCR.
         </p>
       </div>
     </div>
@@ -766,6 +770,15 @@ async function bootstrapSession() {
     if (!config.demoMode) {
       document.querySelector('.login-hint')?.setAttribute('hidden', 'hidden');
       document.querySelector('.role-chips')?.setAttribute('hidden', 'hidden');
+      document.querySelector('.login-section-label')?.setAttribute('hidden', 'hidden');
+      document.querySelector('.login-section-help')?.setAttribute('hidden', 'hidden');
+    }
+    if (config.sso?.enabled) {
+      const ssoButton = document.getElementById('ssoButton');
+      if (ssoButton) {
+        ssoButton.hidden = false;
+        ssoButton.href = config.sso.startUrl || '/api/auth/sso';
+      }
     }
   } catch (error) {
     // keep demo login copy if config is unavailable

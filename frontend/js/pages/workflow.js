@@ -20,6 +20,7 @@ export function renderWorkflowPage({ appView, state, renderBreadcrumbBar, getSta
     <div class="page-shell animate-fadeIn">
       ${renderBreadcrumbBar([{ label: 'Workflow', link: null }])}
       <div class="page-header"><div><h1 class="page-title">Invoice Workflow</h1><p class="page-subtitle">End-to-end processing pipeline from ingestion to ERP posting and reconciliation.</p></div></div>
+      ${(state.queueJobs || []).length ? `<div class="section-card" style="margin-bottom:20px;"><h3>Processing queue</h3>${state.queueJobs.slice(0, 8).map((job) => `<div class="check-row"><div><strong>${job.payload?.invoiceId || job.id}</strong><div style="color:var(--muted);font-size:0.82rem;">${job.type} · ${job.status}</div></div></div>`).join('')}</div>` : ''}
       <div style="display: grid; gap: 20px;">
         ${workflows.map((invoice) => `
           <div class="section-card animate-slideUp">

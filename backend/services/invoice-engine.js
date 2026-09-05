@@ -4,6 +4,7 @@ const { extractLineItems, extractLineItemsFromLayout, extractTaxBreakdown, extra
 const { scoreDocumentQuality, getVendorTemplate, extractPdfLayout } = require('../src/services/document-intelligence.service');
 const { HttpDocumentAiProvider } = require('../src/ai/http.provider');
 const { findVendorTemplate } = require('../src/services/vendor-template.service');
+const { parseEinvoicePayload, einvoiceToExtracted } = require('../src/services/einvoice.service');
 const { repairOcrText, preferStructuredText, extractGstin, extractIrn, pickVendorName } = require('../src/services/extraction-refine.service');
 
 async function extractPdfText(buffer) {
@@ -948,6 +949,21 @@ async function extractInvoiceData(file) {
   }
 
   const originalName = file.originalname || '';
+  const mime = String(file.mimetype || '').toLowerCase();
+  if (originalName.toLowerCase().endsWith('.json') || mime.includes('json')) {
+    const parsed = parseEinvoicePayload(file.buffer || file);
+    if (parsed) {
+      const extracted = einvoiceToExtracted(parsed);
+      Object.assign(extracted, deriveVendorMetadata(extracted));
+      extracted.validation = buildValidationChecks(extracted);
+      extracted.fieldEvidence = {
+        vendor: { value: extracted.vendor, source: 'e-invoice', confidence: 0.99, needsReview: false },
+        invoiceNumber: { value: extracted.invoiceNumber, source: 'e-invoice', confidence: 0.99, needsReview: false },
+        irn: { value: extracted.irn, source: 'e-invoice', confidence: 0.99, needsReview: false }
+      };
+      return extracted;
+    }
+  }
   const text = await resolveExtractedText(file);
   const layout = String(file.mimetype || '').toLowerCase() === 'application/pdf' || /\.pdf$/i.test(originalName)
     ? await extractPdfLayout(file.buffer)
@@ -1296,6 +1312,7 @@ async function extractInvoiceData(file) {
   const learned = await findVendorTemplate({ gstin: extracted.supplierGstin, vendor: extracted.vendor }).catch(() => null);
   if (learned) {
     extracted.vendorTemplate = { ...extracted.vendorTemplate, learned: true, id: learned.id, columnMap: learned.columnMap };
+    extracted.templateStable = true;
   }
 
   if (process.env.DOCUMENT_AI_URL) {
@@ -1370,14 +1387,29 @@ function amountIsWithinTdsTolerance(amount) {
   return Number(amount || 0) < 300000;
 }
 
-function generateRecommendation(invoice = {}, { vendors = [], transactions = [] } = {}) {
+function generateRecommendation(invoice = {}, { vendors = [], transactions = [], postedInvoices = [] } = {}) {
   const matchVendor = (invoice.vendor || '').trim();
   const vendorCandidates = vendors.filter((vendor) => {
     const target = String(vendor.name || '').toLowerCase();
     return !matchVendor || target.includes(matchVendor.toLowerCase()) || matchVendor.toLowerCase().includes(target);
   });
 
-  const candidateTransactions = transactions.filter((tx) => {
+  const postedAsTransactions = (postedInvoices || [])
+    .filter((item) => item && (item.status === 'posted' || item.posting?.posted))
+    .map((item) => ({
+      vendorId: item.vendorId,
+      vendor: item.vendor,
+      po: item.po,
+      poTotal: item.amount,
+      description: item.description,
+      hsnCode: item.hsnCode,
+      glAccount: item.aiRecommendation?.glAccount || item.glAccount,
+      costCenter: item.aiRecommendation?.costCenter || item.costCenter,
+      taxCode: item.aiRecommendation?.taxCode || item.taxCode
+    }));
+  const historyPool = [...transactions, ...postedAsTransactions];
+
+  const candidateTransactions = historyPool.filter((tx) => {
     const sameVendor = vendorCandidates.length
       ? vendorCandidates.some((vendor) => vendor.id === tx.vendorId || vendor.name === tx.vendor)
       : true;
@@ -1390,7 +1422,7 @@ function generateRecommendation(invoice = {}, { vendors = [], transactions = [] 
     return sameVendor && (sameDescription || sameHsn || samePo);
   });
 
-  const fallbackTransactions = transactions.filter((tx) => {
+  const fallbackTransactions = historyPool.filter((tx) => {
     if (candidateTransactions.some((item) => item.po === tx.po)) return false;
     return (invoice.vendor ? String(tx.vendor || '').toLowerCase().includes(String(invoice.vendor).toLowerCase()) : true)
       || (invoice.hsnCode ? String(tx.hsnCode || '').includes(String(invoice.hsnCode)) : false)

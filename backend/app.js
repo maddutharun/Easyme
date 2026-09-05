@@ -9,7 +9,7 @@ const { extractInvoiceData, reconcileInvoiceAgainstErp, generateRecommendation }
 const { vendors, transactions, invoices: seedInvoices } = require('./data/seed');
 const { createErpAdapter } = require('./services/erp-adapter');
 const { matchingPolicy, uploadPolicy, allowedInvoiceMimeTypes, allowedInvoiceExtensions } = require('./config/app-config');
-const { PORT, AUTH_REQUIRED, STORAGE_PATH, NODE_ENV, TRUST_PROXY, DEMO_MODE } = require('./config/env');
+const { PORT, AUTH_REQUIRED, STORAGE_PATH, NODE_ENV, TRUST_PROXY, DEMO_MODE, AUTO_POST_ENABLED, AUTO_POST_EXECUTE, OIDC_AUTHORIZE_URL, OIDC_CLIENT_ID, OIDC_REDIRECT_URI, OIDC_SCOPE, INBOX_DIR, INBOX_WATCH, STORAGE_DRIVER, DOCUMENT_AI_URL } = require('./config/env');
 const { initializeDatabase, createPersistentStore } = require('./services/database.service');
 const { authenticate, signToken, requireAuth, requireRole } = require('./services/auth.service');
 const { decorateInvoice, isException, isPosted, isReview, STATUSES, normalizeStatus } = require('./src/status');
@@ -17,12 +17,18 @@ const { invoiceQueue } = require('./services/queue.service');
 const { reconcilePostedInvoice } = require('./src/services/reconciliation.service');
 const { recordFeedback } = require('./src/services/feedback.service');
 const { validateDocumentType, nextStatus } = require('./src/services/scenario.service');
-const { validateFileSignature } = require('./src/services/file-security.service');
 const { APPROVAL_ROLES } = require('../services/posting.service');
 const { calculateConfidence } = require('./src/services/confidence.service');
 const { publicInvoice, isPathInsideRoot } = require('./src/services/public-invoice');
 const { collectExceptionReasons } = require('./src/services/exception-reasons.service');
 const { saveVendorTemplate } = require('./src/services/vendor-template.service');
+const { matchInvoiceLines } = require('./src/services/line-match.service');
+const { decideAutoPost } = require('./src/services/auto-post.service');
+const { scanUpload } = require('./src/services/file-scan.service');
+const { scoreExtraction, summarizeEval } = require('./src/services/extraction-eval.service');
+const { storeInvoiceFile } = require('./src/services/storage.service');
+const { startInboxWatch } = require('./src/services/inbox-watch.service');
+const { parseEinvoicePayload } = require('./src/services/einvoice.service');
 
 const APP_VERSION = 'ai-ap-invoice-v1.0.0';
 const APP_BUILD = 'premium-login';
@@ -229,7 +235,10 @@ function metricsSnapshot() {
     readyToPost,
     queries: decorated.filter((invoice) => invoice.status === STATUSES.QUERY_OPEN).length,
     averageConfidence: total ? Number((decorated.reduce((sum, invoice) => sum + Number(invoice.confidence || 0), 0) / total).toFixed(2)) : 0,
-    totalVolume: decorated.reduce((sum, invoice) => sum + Number(invoice.amount || 0), 0)
+    totalVolume: decorated.reduce((sum, invoice) => sum + Number(invoice.amount || 0), 0),
+    autoPostEligible: decorated.filter((invoice) => invoice.autoPost?.eligible).length,
+    stpRate: total ? Number((posted / total).toFixed(4)) : 0,
+    queueBacklog: invoiceQueue.backlog()
   };
 }
 
@@ -300,12 +309,42 @@ app.get('/api/auth/me', requireAuth, (req, res) => {
   res.json({ user: req.user });
 });
 
+app.get('/api/auth/sso', (req, res) => {
+  if (!OIDC_AUTHORIZE_URL || !OIDC_CLIENT_ID) {
+    return res.status(404).json({ error: 'SSO is not configured. Set OIDC_AUTHORIZE_URL and OIDC_CLIENT_ID.' });
+  }
+  const redirectUri = OIDC_REDIRECT_URI || `${req.protocol}://${req.get('host')}/api/auth/oidc/callback`;
+  const stateToken = crypto.randomUUID();
+  const url = new URL(OIDC_AUTHORIZE_URL);
+  url.searchParams.set('client_id', OIDC_CLIENT_ID);
+  url.searchParams.set('redirect_uri', redirectUri);
+  url.searchParams.set('response_type', 'code');
+  url.searchParams.set('scope', OIDC_SCOPE || 'openid email profile');
+  url.searchParams.set('state', stateToken);
+  res.redirect(url.toString());
+});
+
+app.get('/api/auth/oidc/callback', (req, res) => {
+  res.status(501).json({
+    error: 'OIDC token exchange is not enabled in this environment. Configure an identity provider callback before using SSO in production.'
+  });
+});
+
 app.get('/api/config', (req, res) => res.json({
   matchingPolicy,
   supportedUploadTypes: uploadPolicy.supportedTypes,
   maxUploadSizeMb: uploadPolicy.maxSizeMb,
   authRequired: AUTH_REQUIRED,
   demoMode: DEMO_MODE,
+  autoPost: {
+    enabled: AUTO_POST_ENABLED,
+    execute: AUTO_POST_EXECUTE
+  },
+  sso: {
+    enabled: Boolean(OIDC_AUTHORIZE_URL && OIDC_CLIENT_ID),
+    startUrl: OIDC_AUTHORIZE_URL && OIDC_CLIENT_ID ? '/api/auth/sso' : null
+  },
+  documentAiConfigured: Boolean(DOCUMENT_AI_URL),
   demoUsers: DEMO_MODE ? [
     { email: 'finance@easyme.local', role: 'finance_approver' },
     { email: 'manager@easyme.local', role: 'ap_manager' },
@@ -347,7 +386,7 @@ app.get('/api/observability', requireAuth, (req, res) => {
       averageProcessingMs: 1800,
       aiFailureRate: 0.02,
       erpFailureRate: 0.01,
-      queueBacklog: 0,
+      queueBacklog: invoiceQueue.backlog(),
       recommendationAccuracy: 97.3,
       totalInvoices: invoices.length,
       totalVolume: allInvoices.reduce((sum, value) => sum + value, 0)
@@ -416,7 +455,9 @@ app.get('/api/health', async (req, res) => {
   res.json({
     status: 'ok',
     erp: erpHealth.ok ? 'connected' : 'degraded',
-    storage: 'sqlite',
+    storage: STORAGE_DRIVER || 'local',
+    documentAi: DOCUMENT_AI_URL ? 'configured' : 'local',
+    autoPostExecute: AUTO_POST_EXECUTE,
     mode: AUTH_REQUIRED ? 'secured' : 'demo',
     env: NODE_ENV,
     checkedAt: new Date().toISOString()
@@ -436,6 +477,21 @@ app.get('/api/roles', requireAuth, (req, res) => {
 
 app.get('/api/metrics', requireAuth, (req, res) => {
   res.json({ metrics: metricsSnapshot(), timestamp: new Date().toISOString() });
+});
+
+app.get('/api/eval/extraction', requireAuth, requireRole('ap_manager', 'finance_approver', 'admin'), async (req, res) => {
+  const goldensPath = path.join(__dirname, '..', 'tests', 'eval', 'goldens.json');
+  const goldens = JSON.parse(fs.readFileSync(goldensPath, 'utf8'));
+  const results = [];
+  for (const golden of goldens) {
+    const extracted = await extractInvoiceData({
+      originalname: golden.originalname,
+      mimetype: golden.mimetype,
+      buffer: Buffer.from(golden.text)
+    });
+    results.push({ id: golden.id, ...scoreExtraction(extracted, golden.expected) });
+  }
+  res.json({ summary: summarizeEval(results), results });
 });
 
 app.get('/api/queue', requireAuth, (req, res) => {
@@ -540,7 +596,11 @@ app.post('/api/invoices/:id/recommendation', requireAuth, requireRole('ap_manage
   const invoice = invoices.find((item) => item.id === req.params.id);
   if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
 
-  const recommendation = generateRecommendation(invoice, { vendors, transactions });
+  const recommendation = generateRecommendation(invoice, {
+    vendors,
+    transactions,
+    postedInvoices: invoices.filter((item) => item.status === 'posted' || item.posting?.posted)
+  });
   invoice.aiRecommendation = recommendation;
   invoice.confidence = recommendation.confidence;
   invoice.status = recommendation.confidence >= 95 ? 'ready_to_post' : 'pending_review';
@@ -566,7 +626,11 @@ app.post('/api/invoices/:id/post', requireAuth, requireRole('finance_approver', 
     return res.json({ invoice: publicInvoice(invoice), posting: invoice.posting, alreadyPosted: true });
   }
   if (!invoice.aiRecommendation) {
-    const recommendation = generateRecommendation(invoice, { vendors, transactions });
+    const recommendation = generateRecommendation(invoice, {
+      vendors,
+      transactions,
+      postedInvoices: invoices.filter((item) => item.status === 'posted' || item.posting?.posted)
+    });
     invoice.aiRecommendation = recommendation;
   }
 
@@ -608,14 +672,25 @@ app.post('/api/inbox/ingest', requireAuth, upload.single('invoice'), (req, res, 
   req.body = { ...(req.body || {}), sourceChannel: 'email_drop' };
   return handleInvoiceUpload(req, res, next);
 });
+app.post('/api/inbox/einvoice', requireAuth, async (req, res, next) => {
+  const parsed = parseEinvoicePayload(req.body);
+  if (!parsed) return res.status(400).json({ error: 'Body is not a recognized IRN / e-invoice payload.' });
+  req.file = {
+    originalname: `${parsed.invoiceNumber || 'einvoice'}.json`,
+    mimetype: 'application/json',
+    buffer: Buffer.from(JSON.stringify(req.body))
+  };
+  req.body = { ...(req.body || {}), sourceChannel: 'email_drop' };
+  return handleInvoiceUpload(req, res, next);
+});
 
 async function handleInvoiceUpload(req, res) {
   if (!req.file) return res.status(400).json({ error: 'Upload a PDF, PNG, JPG, or Excel invoice no larger than 10 MB.' });
   const sourceChannel = req.body?.sourceChannel === 'email_drop' ? 'email_drop' : 'web_upload';
 
   try {
-    const fileSignature = validateFileSignature(req.file);
-    if (!fileSignature.valid) return res.status(400).json({ error: 'File extension and content signature do not match.' });
+    const fileScan = await scanUpload(req.file);
+    if (!fileScan.ok) return res.status(400).json({ error: fileScan.reason });
     const fileHash = crypto.createHash('sha256').update(req.file.buffer).digest('hex');
     const duplicateFile = invoices.some((entry) => entry.fileHash === fileHash);
 
@@ -661,6 +736,18 @@ async function handleInvoiceUpload(req, res) {
   };
 
   const comparison = reconcileInvoiceAgainstErp(input, { vendors, transactions });
+  const invoiceLines = Array.isArray(extracted.lineItems) ? extracted.lineItems : [];
+  const lineMatch = matchInvoiceLines(invoiceLines, matchingPo || {}, { ...extracted, mode: extracted.mode || '3-way' });
+  const autoPost = decideAutoPost({
+    enabled: AUTO_POST_ENABLED,
+    extracted,
+    comparison,
+    duplicate: duplicateFile || duplicateInvoice,
+    vendor,
+    lineMatch,
+    templateStable: Boolean(extracted.templateStable),
+    amount: Number(extracted.amount || input.amount || 0)
+  });
   const routing = decideRouting(comparison, extracted, duplicateFile || duplicateInvoice);
   const aiSummary = buildAiReasoning(comparison, { vendor, po: matchingPo?.po, matchingPo });
   const status = routing.status === STATUSES.READY_TO_POST ? STATUSES.READY_TO_POST : routing.status === STATUSES.REJECTED ? STATUSES.REJECTED : routing.status;
@@ -691,6 +778,9 @@ async function handleInvoiceUpload(req, res) {
     extraction: isReadable ? 'OCR + ERP validation' : 'Manual review required',
     aiSummary,
     decision: routing,
+    lineMatch,
+    autoPost,
+    vendorQuery: { status: 'closed', thread: [] },
     compositeConfidence: calculateConfidence({
       extraction: Number(extracted.documentQuality?.score || 0) * 100,
       vendor: vendor ? 100 : 25,
@@ -731,7 +821,9 @@ async function handleInvoiceUpload(req, res) {
     comparison,
     duplicate: duplicateFile || duplicateInvoice,
     vendor,
-    invoices
+    invoices,
+    lineMatch,
+    autoPost
   });
   if (invoice.exceptionReasons.length) {
     invoice.issue = invoice.exceptionReasons[0];
@@ -750,9 +842,34 @@ async function handleInvoiceUpload(req, res) {
   }
 
   const persistedName = `${fileHash}${path.extname(req.file.originalname || '.pdf')}`;
-  const storedFilePath = path.join(uploadDir, persistedName);
-  fs.writeFileSync(storedFilePath, req.file.buffer);
-  invoice.storagePath = storedFilePath;
+  const stored = await storeInvoiceFile(req.file.buffer, persistedName);
+  invoice.storagePath = stored.path || path.join(uploadDir, persistedName);
+  invoice.storageKey = stored.key || persistedName;
+  if (!stored.path && invoice.storagePath) {
+    fs.writeFileSync(invoice.storagePath, req.file.buffer);
+  }
+
+  if (AUTO_POST_EXECUTE && autoPost.eligible && invoice.status === STATUSES.READY_TO_POST) {
+    try {
+      const result = await erp.postInvoice(invoice);
+      invoice.status = STATUSES.POSTED;
+      invoice.autoPost = { ...autoPost, autoPosted: true };
+      invoice.approval = { required: false, reviewer: 'auto-post', approvedAt: new Date().toISOString(), overrideReason: null };
+      invoice.posting = {
+        posted: true,
+        erpDocumentNumber: result.erpDocument,
+        postedAt: new Date().toISOString(),
+        error: null,
+        idempotencyKey: result.idempotencyKey || `INV-${invoice.id}`
+      };
+      invoice.issue = 'Auto-posted after calibrated gates passed';
+    } catch (error) {
+      invoice.status = STATUSES.POSTING_FAILED;
+      invoice.autoPost = { ...autoPost, autoPosted: false, blockers: [...(autoPost.blockers || []), 'ERP_POST_FAILED'] };
+      invoice.posting = { posted: false, erpDocumentNumber: null, postedAt: null, error: error.message };
+      invoice.issue = error.message;
+    }
+  }
 
   invoices.unshift(invoice);
   invoiceQueue.enqueue({ id: invoice.id, type: 'invoice-processing', payload: { invoiceId: invoice.id } });
@@ -886,6 +1003,13 @@ app.post('/api/invoices/:id/action', requireAuth, requireRole('ap_clerk', 'ap_ma
   if (action === 'query') {
     invoice.status = STATUSES.QUERY_OPEN;
     invoice.issue = 'Query sent to vendor owner for evidence';
+    invoice.vendorQuery = {
+      status: 'open',
+      thread: [
+        ...((invoice.vendorQuery && invoice.vendorQuery.thread) || []),
+        { at: new Date().toISOString(), actor: actorFrom(req), message: req.body.message || req.body.reason || 'Please confirm PO, tax, and bank details.' }
+      ]
+    };
   }
   if (action === 'reject') {
     invoice.status = STATUSES.REJECTED;
@@ -924,6 +1048,30 @@ app.post('/api/invoices/:id/action', requireAuth, requireRole('ap_clerk', 'ap_ma
   res.json({ invoice: publicInvoice(decorateInvoice(invoice)) });
 });
 
+app.get('/api/invoices/:id/vendor-query', requireAuth, (req, res) => {
+  const invoice = invoices.find((item) => item.id === req.params.id);
+  if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
+  res.json({ invoiceId: invoice.id, vendorQuery: invoice.vendorQuery || { status: 'closed', thread: [] } });
+});
+
+app.post('/api/invoices/:id/vendor-query', requireAuth, requireRole('ap_clerk', 'ap_manager', 'finance_approver', 'admin'), (req, res) => {
+  const invoice = invoices.find((item) => item.id === req.params.id);
+  if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
+  const message = String(req.body?.message || '').trim();
+  if (!message) return res.status(400).json({ error: 'message is required' });
+  invoice.vendorQuery = invoice.vendorQuery || { status: 'open', thread: [] };
+  invoice.vendorQuery.status = 'open';
+  invoice.vendorQuery.thread.push({
+    at: new Date().toISOString(),
+    actor: actorFrom(req),
+    message
+  });
+  invoice.status = STATUSES.QUERY_OPEN;
+  invoice.issue = message;
+  recordAudit('Vendor query sent', invoice, message, { actorId: req.user?.sub || 'system' });
+  res.status(201).json({ invoice: publicInvoice(decorateInvoice(invoice)), vendorQuery: invoice.vendorQuery });
+});
+
 app.get('/api/invoices/:id/file', requireAuth, (req, res) => {
   const invoice = invoices.find((item) => item.id === req.params.id);
   if (!invoice?.storagePath || !fs.existsSync(invoice.storagePath)) {
@@ -946,6 +1094,28 @@ app.use((error, req, res, next) => {
 if (require.main === module) {
   ready.then(() => {
     app.listen(PORT, () => console.log(`Invoice Intelligence Hub running at http://localhost:${PORT}`));
+    if (INBOX_WATCH) {
+      startInboxWatch({
+        directory: INBOX_DIR,
+        ingest: async (file, meta) => {
+          const fakeReq = { file, body: { sourceChannel: meta.sourceChannel || 'mailbox' }, user: { name: 'inbox-watch' }, ip: 'inbox' };
+          await new Promise((resolve, reject) => {
+            const fakeRes = {
+              status(code) {
+                this.statusCode = code;
+                return this;
+              },
+              json(payload) {
+                if ((this.statusCode || 200) >= 400) reject(new Error(payload.error || 'Inbox ingest failed'));
+                else resolve(payload);
+              }
+            };
+            handleInvoiceUpload(fakeReq, fakeRes).catch(reject);
+          });
+        }
+      });
+      console.log(`[inbox] watching ${INBOX_DIR}`);
+    }
   });
 }
 

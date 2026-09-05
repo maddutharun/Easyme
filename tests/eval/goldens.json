@@ -1,0 +1,46 @@
+[
+  {
+    "id": "ajro-digital",
+    "originalname": "invoice.pdf",
+    "mimetype": "application/pdf",
+    "text": "\nAjro Private Limited\nInvoice No: AJ-2048\nInvoice Date: 18-Aug-2026\nPO Number: PO-4502187\nTotal Amount: $12,480.00\nGST: $1,200.00\nHSN/SAC: 998314\n",
+    "expected": {
+      "vendor": "Ajro Private Limited",
+      "invoiceNumber": "AJ-2048",
+      "date": "2026-08-18",
+      "po": "PO-4502187",
+      "amount": 12480,
+      "tax": 1200,
+      "hsnCode": "998314"
+    }
+  },
+  {
+    "id": "northstar-ocr-comma",
+    "originalname": "real-invoice.pdf",
+    "mimetype": "application/pdf",
+    "text": "\nNorthstar Office Co. Invoice No. NS-88214 Date: 2026-08-26 PO No. PO-4500188 Amount Due: ,480.00 GST: ,200.00 HSN/SAC: 998314 Vendor: Northstar Office Co.\n",
+    "expected": {
+      "vendor": "Northstar Office Co.",
+      "invoiceNumber": "NS-88214",
+      "po": "PO-4500188",
+      "amount": 480,
+      "tax": 200,
+      "hsnCode": "998314"
+    }
+  },
+  {
+    "id": "cultsport",
+    "originalname": "174.pdf",
+    "mimetype": "application/pdf",
+    "text": "\n      Tax Invoice\n      Cultsport Private Limited\n      GSTIN/UIN: 09AAHCC1095P1Z3\n      State Name : Uttar Pradesh, Code : 09\n      Invoice No. UP1470740\n      Date 14-Aug-26\n      1 Cult Tummy Trimmer CST701STBKNA\n      HSN/SAC 9506990\n      GST 18%\n      Output GST UP 1,811.52\n      Total 1,811.52\n    ",
+    "expected": {
+      "vendor": "Cultsport Private Limited",
+      "invoiceNumber": "UP1470740",
+      "date": "2026-08-14",
+      "amount": 1811.52,
+      "tax": 1811.52,
+      "hsnCode": "9506990",
+      "po": "N/A"
+    }
+  }
+]

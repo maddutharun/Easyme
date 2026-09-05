@@ -19,7 +19,8 @@ export function renderExceptionsPage({ appView, state, renderBreadcrumbBar, form
       <div class="worklist">
         ${exceptions.length ? exceptions.map((invoice) => {
           const blockers = failedChecks(invoice);
-          const reason = invoice.issue || (blockers.length ? blockers.slice(0, 2).join(' · ') : 'Needs review');
+          const lineGap = invoice.lineMatch && invoice.lineMatch.passed === false ? 'Line mismatch' : null;
+          const reason = invoice.issue || lineGap || (blockers.length ? blockers.slice(0, 2).join(' · ') : 'Needs review');
           const money = invoice.currency === 'INR' ? null : formatMoney;
           const amount = money ? money(invoice.amount || 0) : `Rs ${Number(invoice.amount || 0).toLocaleString('en-IN')}`;
           return `
