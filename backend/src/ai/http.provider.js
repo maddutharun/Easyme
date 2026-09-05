@@ -1,4 +1,4 @@
-const { AIProvider } = require('./ai.provider');
+  const { AIProvider } = require('./ai.provider');
 
 class HttpDocumentAiProvider extends AIProvider {
   constructor({ url, apiKey, sendFile = false, timeoutMs = 8000 } = {}) {

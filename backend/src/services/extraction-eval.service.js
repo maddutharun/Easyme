@@ -1,4 +1,4 @@
-function scoreField(actual, expected, { numeric = false, tolerance = 0.01 } = {}) {
+  function scoreField(actual, expected, { numeric = false, tolerance = 0.01 } = {}) {
   if (expected === undefined) return { scored: false };
   if (numeric) {
     const delta = Math.abs(Number(actual || 0) - Number(expected || 0));

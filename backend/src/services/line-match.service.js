@@ -1,4 +1,4 @@
-const DEFAULT_PROFILE = { qty_tolerance_pct: 2, line_amount_tolerance_pct: 1 };
+  const DEFAULT_PROFILE = { qty_tolerance_pct: 2, line_amount_tolerance_pct: 1 };
 
 function withinPct(actual, expected, pct) {
   const right = Number(expected || 0);

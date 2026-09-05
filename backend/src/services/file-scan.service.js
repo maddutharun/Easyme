@@ -1,4 +1,4 @@
-const { validateFileSignature } = require('./file-security.service');
+  const { validateFileSignature } = require('./file-security.service');
 
 async function scanUpload(file) {
   const signature = validateFileSignature(file);

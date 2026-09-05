@@ -1,4 +1,4 @@
-const COMPANY_SUFFIX = /\b(private limited|pvt\.?\s*ltd\.?|limited|ltd\.?|llc|inc\.?|co\.|company|llp|gmbh|plc)\b/i;
+  const COMPANY_SUFFIX = /\b(private limited|pvt\.?\s*ltd\.?|limited|ltd\.?|llc|inc\.?|co\.|company|llp|gmbh|plc)\b/i;
 const STOP_LINE = /^(taxable amount|cgst|sgst|igst|utgst|grand total|total amount|amount due|net payable|output gst|freight|round off|bank details|authorized|authorised|seal of company|declaration|hsn\/sac\s*$)/i;
 const GSTIN_CHARS = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ';
 

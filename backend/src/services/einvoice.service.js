@@ -1,4 +1,4 @@
-function parseEinvoicePayload(raw) {
+  function parseEinvoicePayload(raw) {
   let data = raw;
   if (Buffer.isBuffer(raw) || typeof raw === 'string') {
     try {

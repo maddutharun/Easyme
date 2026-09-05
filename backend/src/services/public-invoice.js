@@ -1,4 +1,4 @@
-function publicInvoice(invoice) {
+  function publicInvoice(invoice) {
   if (!invoice || typeof invoice !== 'object') return invoice;
   const { storagePath, ...rest } = invoice;
   return {

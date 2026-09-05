@@ -1,4 +1,4 @@
-const { matchingPolicy } = require('../../config/app-config');
+  const { matchingPolicy } = require('../../config/app-config');
 
 function decideAutoPost({
   enabled = false,
