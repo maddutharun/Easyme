@@ -1,7 +1,11 @@
 const fs = require('fs');
 const XLSX = require('xlsx');
-const { extractLineItems, extractTaxBreakdown, extractCharges, extractTaxSummary, detectTemplate, detectColumnMap, buildFieldEvidence, validateArithmetic, deduplicateDocumentText } = require('../src/services/line-item-extraction.service');
+const { extractLineItems, extractLineItemsFromLayout, extractTaxBreakdown, extractCharges, extractTaxSummary, detectTemplate, detectColumnMap, buildFieldEvidence, validateArithmetic, deduplicateDocumentText } = require('../src/services/line-item-extraction.service');
 const { scoreDocumentQuality, getVendorTemplate, extractPdfLayout } = require('../src/services/document-intelligence.service');
+const { HttpDocumentAiProvider } = require('../src/ai/http.provider');
+const { findVendorTemplate } = require('../src/services/vendor-template.service');
+const { parseEinvoicePayload, einvoiceToExtracted } = require('../src/services/einvoice.service');
+const { repairOcrText, preferStructuredText, extractGstin, extractIrn, pickVendorName } = require('../src/services/extraction-refine.service');
 
 async function extractPdfText(buffer) {
   if (!buffer || buffer.length === 0) return '';
@@ -645,6 +649,19 @@ function extractLineValue(text, labels) {
   return match ? match[1].trim() : null;
 }
 
+function extractSupplierState(text) {
+  const lines = String(text || '').split(/\n|;/).map((line) => line.trim()).filter(Boolean);
+  const stateLine = lines.find((line) => /^state(?:\s*name)?\s*[:=]/i.test(line));
+  if (stateLine) {
+    return stateLine
+      .replace(/^state(?:\s*name)?\s*[:=]\s*/i, '')
+      .replace(/\s*,\s*code\s*[:=].*$/i, '')
+      .replace(/\s*\(\d+\)\s*$/g, '')
+      .trim();
+  }
+  return null;
+}
+
 function extractShipToDetails(text) {
   const lines = String(text || '').split(/\n|;/).map((line) => line.trim()).filter(Boolean);
   const index = lines.findIndex((line) => /(?:ship(?:ped)? to|bill to|consignee)/i.test(line));
@@ -675,11 +692,11 @@ function extractQuantity(text) {
 }
 
 function extractAmountForLabel(text, labels) {
-  const regex = new RegExp(`(?:${labels.join('|')})\\s*[:=]\\s*([₹$A-Za-z0-9, .-]+)`, 'i');
+  const escaped = labels.map((label) => String(label).replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+'));
+  const regex = new RegExp(`(?:${escaped.join('|')})\\s*[:=\\-]?\\s*(?:[$₹]|rs\\.?|inr|usd)?\\s*([\\d,]+(?:\\.\\d{1,2})?)`, 'i');
   const match = String(text || '').match(regex);
   if (!match) return 0;
-  const cleaned = match[1].replace(/[₹$,A-Za-z]/g, '').replace(/\s+/g, '').replace(/,/g, '');
-  const numeric = Number(cleaned);
+  const numeric = Number(String(match[1]).replace(/,/g, ''));
   return Number.isFinite(numeric) ? numeric : 0;
 }
 
@@ -712,12 +729,9 @@ function parseInvoiceFieldValues(normalizedText) {
   const panMatch = String(canonicalText || '').match(/pan\s*[:=]?\s*([A-Z0-9]{10})/i);
   if (panMatch) values.supplierPan = panMatch[1].trim().toUpperCase();
 
-  const explicitStateLine = String(canonicalText || '').match(/(^|\n)state\s*[:=]?\s*([A-Za-z\s]+?)(?:\s*\(\d+\)|\s*$)/i);
+  const explicitStateLine = extractSupplierState(canonicalText);
   if (explicitStateLine) {
-    values.supplierState = explicitStateLine[2].trim();
-  } else {
-    const placeOfSupplyMatch = String(canonicalText || '').match(/(^|\n)place\s*of\s*supply\s*[:=]?\s*([A-Za-z\s]+?)(?:\s*\(\d+\)|\s*$)/i);
-    if (placeOfSupplyMatch) values.supplierState = placeOfSupplyMatch[2].trim();
+    values.supplierState = explicitStateLine;
   }
 
   const addressLines = [];
@@ -739,12 +753,8 @@ function parseInvoiceFieldValues(normalizedText) {
       if (match) values.vendor = match[1].trim();
     }
 
-    if (!values.supplierState && /^state\s*[:=]/i.test(line)) {
-      values.supplierState = line.replace(/^state\s*[:=]\s*/i, '').replace(/\s*\(\d+\)\s*$/, '').trim();
-    }
-
-    if (!values.supplierState && /^place\s*of\s*supply\s*[:=]/i.test(line)) {
-      values.supplierState = line.replace(/^place\s*of\s*supply\s*[:=]\s*/i, '').replace(/\s*\(\d+\)\s*$/, '').trim();
+    if (!values.supplierState && /^state(?:\s*name)?\s*[:=]/i.test(line)) {
+      values.supplierState = line.replace(/^state(?:\s*name)?\s*[:=]\s*/i, '').replace(/\s*,\s*code\s*[:=].*$/i, '').replace(/\s*\(\d+\)\s*$/, '').trim();
     }
 
     if (!values.invoiceNumber && /invoice\s*(?:no|number|#|id)\.?/i.test(line)) {
@@ -797,7 +807,7 @@ function parseInvoiceFieldValues(normalizedText) {
   values.hsnCode = values.hsnCode || normalizedText.match(/(?:hsn\s*(?:code)?|sac)\s*[:=]?\s*([0-9]{4,8})/i)?.[1] || null;
   values.quantity = values.quantity || extractQuantity(normalizedText);
   values.baseAmount = values.baseAmount || extractAmountForLabel(normalizedText, ['base amount']);
-  values.taxAmount = values.taxAmount || extractAmountForLabel(normalizedText, ['tax amount', 'gst', 'output gst']);
+  values.taxAmount = values.taxAmount || extractAmountForLabel(normalizedText, ['tax amount', 'output gst']);
   values.totalAmount = values.totalAmount || extractAmountForLabel(normalizedText, ['total amount', 'grand total', 'amount due', 'net total']);
   values.signaturePresent = /authorized signatory|authorised signatory|signature/i.test(normalizedText);
   values.sealPresent = /seal(?:\s+of\s+company)?|stamp/i.test(normalizedText);
@@ -939,14 +949,30 @@ async function extractInvoiceData(file) {
   }
 
   const originalName = file.originalname || '';
+  const mime = String(file.mimetype || '').toLowerCase();
+  if (originalName.toLowerCase().endsWith('.json') || mime.includes('json')) {
+    const parsed = parseEinvoicePayload(file.buffer || file);
+    if (parsed) {
+      const extracted = einvoiceToExtracted(parsed);
+      Object.assign(extracted, deriveVendorMetadata(extracted));
+      extracted.validation = buildValidationChecks(extracted);
+      extracted.fieldEvidence = {
+        vendor: { value: extracted.vendor, source: 'e-invoice', confidence: 0.99, needsReview: false },
+        invoiceNumber: { value: extracted.invoiceNumber, source: 'e-invoice', confidence: 0.99, needsReview: false },
+        irn: { value: extracted.irn, source: 'e-invoice', confidence: 0.99, needsReview: false }
+      };
+      return extracted;
+    }
+  }
   const text = await resolveExtractedText(file);
   const layout = String(file.mimetype || '').toLowerCase() === 'application/pdf' || /\.pdf$/i.test(originalName)
     ? await extractPdfLayout(file.buffer)
     : { pages: [], text: '' };
-  const layoutText = layout.text && layout.text.length > String(text || '').length * 0.7 ? layout.text : text;
-  const normalizedText = deduplicateDocumentText(String(layoutText || '').replace(/\r/g, ' ').trim());
+  const structured = preferStructuredText(layout.text, text);
+  const preRepairText = String(structured || '').replace(/\r/g, ' ').trim();
+  const normalizedText = deduplicateDocumentText(repairOcrText(preRepairText));
   const lowerText = normalizedText.toLowerCase();
-  const readableText = hasMeaningfulInvoiceText(text);
+  const readableText = hasMeaningfulInvoiceText(text) || hasMeaningfulInvoiceText(normalizedText);
   const pipelineMeta = classifyDocument(file, text);
   const documentQuality = scoreDocumentQuality(file, text);
 
@@ -1004,7 +1030,7 @@ async function extractInvoiceData(file) {
   const hsnMatch = fieldValues.hsnCode || normalizedText.match(/(?:hsn\s*(?:code)?|sac)\s*[:=]?\s*([0-9]{4,8})/i)?.[1] || null;
   const quantityFromText = fieldValues.quantity || extractQuantity(normalizedText);
   const baseAmount = fieldValues.baseAmount || extractAmountForLabel(normalizedText, ['base amount']);
-  const taxAmount = fieldValues.taxAmount || extractAmountForLabel(normalizedText, ['tax amount', 'gst', 'output gst']);
+  const taxAmount = fieldValues.taxAmount || extractAmountForLabel(normalizedText, ['tax amount', 'output gst']);
   const totalAmount = fieldValues.totalAmount || extractAmountForLabel(normalizedText, ['total amount', 'grand total', 'amount due', 'net total']);
   const signaturePresent = /authorized signatory|authorised signatory|signature/i.test(normalizedText);
   const sealPresent = /seal(?:\s+of\s+company)?|stamp/i.test(normalizedText);
@@ -1017,11 +1043,14 @@ async function extractInvoiceData(file) {
     'cultsport': 'Cultsport Private Limited'
   };
 
+  const gstinInfo = extractGstin(normalizedText);
+  const irn = extractIrn(normalizedText);
   const supplierName = fieldValues.supplierName || normalizedText.match(/(?:m\/s|ms|company|seller|supplier|vendor)\s*[:\-]?\s*([A-Z0-9&/ .()-]{3,120})/i)?.[1]?.trim() || null;
   const vendor = sanitizeVendorName(
-    fieldValues.vendor
+    pickVendorName(normalizedText, { ...fieldValues, supplierName }, vendorMap)
+    || fieldValues.vendor
     || Object.entries(vendorMap).find(([key]) => lowerText.includes(key))?.[1]
-    || normalizedText.match(/(?:seller|vendor|bill to|from|sold by|supplier)\s*[:\-]?\s*([A-Za-z&. ()-]{3,80})(?=\s*(?:gstin|gstin\/uin|state name|invoice|date|po|amount|tax|hsn|sac|vendor|$))/i)?.[1]?.trim()
+    || normalizedText.match(/(?:seller|vendor|sold by|supplier)\s*[:\-]?\s*([A-Za-z&. ()-]{3,80})(?=\s*(?:gstin|gstin\/uin|state name|invoice|date|po|amount|tax|hsn|sac|vendor|$))/i)?.[1]?.trim()
     || normalizedText.match(/([A-Z][A-Za-z0-9&.() -]{3,80})\s*(?:gstin|gstin\/uin|state name)/i)?.[1]?.trim()
     || supplierName
     || normalizedText.split(/\n|;/).map((line) => line.trim()).find((line) => {
@@ -1055,7 +1084,7 @@ async function extractInvoiceData(file) {
   const amountPatterns = [
     /(?:total|grand total|amount due|net total|total amount|amount)\s*[:=]?\s*(?:[$₹]|rs\.?|inr|usd)?\s*([\d,]{1,}(?:\.\d{2})?)(?=$|[^\d.,])/i,
     /(?:output gst(?:\s+[a-z]+)?)\s*[:=]?\s*(?:[$₹]|rs\.?|inr|usd)?\s*([\d,]{1,}(?:\.\d{2})?)(?=$|[^\d.,])/i,
-    /(?:gst)\s*[:=]?\s*(?:[$₹]|rs\.?|inr|usd)?\s*([\d,]{1,}(?:\.\d{2})?)(?=$|[^\d.,])(?!\s*%)/i,
+    /\bgst\b\s*[:=]\s*(?:[$₹]|rs\.?|inr|usd)?\s*([\d,]{1,}(?:\.\d{2})?)(?=$|[^\d.,])(?!\s*%)/i,
     /(?:[$₹]|rs\.?|inr|usd)\s*([\d,]{1,}(?:\.\d{2})?)(?=$|[^\d.,])/i
   ];
   const explicitAmountMatch = amountPatterns.map((pattern) => normalizedText.match(pattern)).find(Boolean);
@@ -1068,9 +1097,8 @@ async function extractInvoiceData(file) {
   const po = poMatch ? String(poMatch).toUpperCase() : 'N/A';
 
   const taxMatch = fieldValues.tax
-    || normalizedText.match(/(?:tax amount|output\s*gst|gst)\s*[:=]?\s*(?:[$₹]|rs\.?|inr|usd)?\s*([\d,]{1,}(?:\.\d{2})?)(?!\s*%)/i)?.[1]
-    || normalizedText.match(/\bgst\b\s*[:=]?\s*(?:[$₹]|rs\.?|inr|usd)?\s*([\d,]{1,}(?:\.\d{2})?)(?!\s*%)/i)?.[1]
-    || normalizedText.match(/(?:output gst up|gst)\s*[a-z\s]*?([\d,]{1,}(?:\.\d{2})?)/i)?.[1]
+    || normalizedText.match(/(?:tax amount|output\s*gst(?:\s+up)?)\s*[:=]?\s*(?:[$₹]|rs\.?|inr|usd)?\s*([\d,]{1,}(?:\.\d{2})?)(?!\s*%)/i)?.[1]
+    || normalizedText.match(/\bgst\b\s*[:=]\s*(?:[$₹]|rs\.?|inr|usd)?\s*([\d,]{1,}(?:\.\d{2})?)(?!\s*% )/i)?.[1]
     || null;
 
   const descriptionMatch = normalizedText.match(/(?:item|description|product)\s*[:=]?\s*([A-Za-z][A-Za-z0-9&/ .-]{3,80})/i)?.[1]
@@ -1079,7 +1107,11 @@ async function extractInvoiceData(file) {
     || normalizedText.split(/\n|;/).map((line) => line.trim()).find((line) => /[A-Za-z]/.test(line) && !/^(invoice|tax invoice|vendor|invoice no|date|hsn|sac|gst|total|output gst|state name|item)$/i.test(line) && line.length > 8 && !/^\d+$/.test(line))
     || null;
 
-  const extractedLineItems = extractLineItems(normalizedText);
+  const extractedLineItems = (() => {
+    const fromText = extractLineItems(normalizedText);
+    if (fromText.length) return fromText;
+    return extractLineItemsFromLayout(layout);
+  })();
   const charges = extractCharges(normalizedText);
   const taxSummary = extractTaxSummary(normalizedText);
   const computedTaxableAmount = extractedLineItems.reduce((sum, line) => sum + Number(line.taxableAmount || 0), 0);
@@ -1119,17 +1151,17 @@ async function extractInvoiceData(file) {
   const hasInrMarker = /₹|\binr\b|rupees?|gstin|state name|tax invoice|output gst|hsn\/sac/i.test(normalizedText);
   const currency = hasUsdMarker ? 'USD' : hasInrMarker ? 'INR' : 'USD';
   const extractionWarnings = [];
-  if (/(?:amount|total|gst|tax)\s*[:=]?\s*[,.;]\s*\d/i.test(normalizedText)) {
+  if (/(?:amount|total|gst|tax)\s*[:=]?\s*[,.;]+\s*\d/i.test(preRepairText) || /(?:amount|total|gst|tax)\s*[:=]?\s*[,.;]+\s*\d/i.test(normalizedText)) {
     extractionWarnings.push('Numeric value may be OCR-corrupted: a leading digit is missing from one or more amount fields.');
   }
 
   const businessDetails = {
     supplier: {
       name: supplierName || vendor || null,
-      gstin: fieldValues.supplierGstin || normalizedText.match(/gstin\s*[:=]?\s*([A-Z0-9]{10,20})/i)?.[1]?.trim().toUpperCase() || null,
+      gstin: fieldValues.supplierGstin || gstinInfo.value || normalizedText.match(/gstin\s*[:=]?\s*([A-Z0-9]{10,20})/i)?.[1]?.trim().toUpperCase() || null,
       pan: fieldValues.supplierPan || normalizedText.match(/pan\s*[:=]?\s*([A-Z0-9]{10})/i)?.[1]?.trim().toUpperCase() || null,
       address: fieldValues.supplierAddress || normalizedText.match(/(?:m\/s|ms|seller|supplier|vendor|company)\s*[:\-]?\s*([A-Z0-9&/ .()-]{3,120})\s*\n\s*([A-Za-z0-9, .()-]{6,120})/i)?.slice(1).join(', ') || null,
-      state: fieldValues.supplierState || (String(normalizedText || '').match(/(^|\n)state\s*[:=]?\s*([A-Za-z\s]+?)(?:\s*\(\d+\)|\s*$)/i)?.[2]?.trim() || String(normalizedText || '').match(/(^|\n)place\s*of\s*supply\s*[:=]?\s*([A-Za-z\s]+?)(?:\s*\(\d+\)|\s*$)/i)?.[2]?.trim()) || null
+      state: fieldValues.supplierState || extractSupplierState(normalizedText) || null
     },
     buyer: {
       name: shipToDetails ? shipToDetails.split(',')[0].trim() : null,
@@ -1159,10 +1191,10 @@ async function extractInvoiceData(file) {
   const extracted = {
     vendor,
     supplierName: supplierName || vendor || null,
-    supplierGstin: fieldValues.supplierGstin || normalizedText.match(/gstin\s*[:=]?\s*([A-Z0-9]{10,20})/i)?.[1]?.trim().toUpperCase() || null,
+    supplierGstin: gstinInfo.value || fieldValues.supplierGstin || normalizedText.match(/gstin\s*[:=]?\s*([A-Z0-9]{10,20})/i)?.[1]?.trim().toUpperCase() || null,
     supplierPan: fieldValues.supplierPan || normalizedText.match(/pan\s*[:=]?\s*([A-Z0-9]{10})/i)?.[1]?.trim().toUpperCase() || null,
     supplierAddress: fieldValues.supplierAddress || normalizedText.match(/(?:m\/s|ms|seller|supplier|vendor|company)\s*[:\-]?\s*([A-Z0-9&/ .()-]{3,120})\s*\n\s*([A-Za-z0-9, .()-]{6,120})/i)?.slice(1).join(', ') || null,
-    supplierState: fieldValues.supplierState || (String(normalizedText || '').match(/(^|\n)state\s*[:=]?\s*([A-Za-z\s]+?)(?:\s*\(\d+\)|\s*$)/i)?.[2]?.trim() || String(normalizedText || '').match(/(^|\n)place\s*of\s*supply\s*[:=]?\s*([A-Za-z\s]+?)(?:\s*\(\d+\)|\s*$)/i)?.[2]?.trim()) || null,
+    supplierState: fieldValues.supplierState || extractSupplierState(normalizedText) || null,
     invoiceNumber,
     date,
     dueDate,
@@ -1207,6 +1239,8 @@ async function extractInvoiceData(file) {
     sealPresent,
     signaturePresent,
     receipt: null,
+    irn,
+    gstinChecksumValid: gstinInfo.valid,
     description: descriptionMatch || null,
     businessDetails,
     readable: true,
@@ -1275,6 +1309,26 @@ async function extractInvoiceData(file) {
     extracted.validation.issues.push(extractionWarnings[0]);
   }
 
+  const learned = await findVendorTemplate({ gstin: extracted.supplierGstin, vendor: extracted.vendor }).catch(() => null);
+  if (learned) {
+    extracted.vendorTemplate = { ...extracted.vendorTemplate, learned: true, id: learned.id, columnMap: learned.columnMap };
+    extracted.templateStable = true;
+  }
+
+  if (process.env.DOCUMENT_AI_URL) {
+    try {
+      const provider = new HttpDocumentAiProvider({
+        url: process.env.DOCUMENT_AI_URL,
+        apiKey: process.env.DOCUMENT_AI_KEY,
+        sendFile: process.env.DOCUMENT_AI_SEND_FILE === 'true'
+      });
+      const enriched = await provider.extractInvoice(file, extracted);
+      Object.assign(extracted, enriched);
+    } catch (error) {
+      extracted.extractionWarnings = [...(extracted.extractionWarnings || []), 'Document AI enrichment skipped'];
+    }
+  }
+
   return extracted;
 }
 
@@ -1333,14 +1387,29 @@ function amountIsWithinTdsTolerance(amount) {
   return Number(amount || 0) < 300000;
 }
 
-function generateRecommendation(invoice = {}, { vendors = [], transactions = [] } = {}) {
+function generateRecommendation(invoice = {}, { vendors = [], transactions = [], postedInvoices = [] } = {}) {
   const matchVendor = (invoice.vendor || '').trim();
   const vendorCandidates = vendors.filter((vendor) => {
     const target = String(vendor.name || '').toLowerCase();
     return !matchVendor || target.includes(matchVendor.toLowerCase()) || matchVendor.toLowerCase().includes(target);
   });
 
-  const candidateTransactions = transactions.filter((tx) => {
+  const postedAsTransactions = (postedInvoices || [])
+    .filter((item) => item && (item.status === 'posted' || item.posting?.posted))
+    .map((item) => ({
+      vendorId: item.vendorId,
+      vendor: item.vendor,
+      po: item.po,
+      poTotal: item.amount,
+      description: item.description,
+      hsnCode: item.hsnCode,
+      glAccount: item.aiRecommendation?.glAccount || item.glAccount,
+      costCenter: item.aiRecommendation?.costCenter || item.costCenter,
+      taxCode: item.aiRecommendation?.taxCode || item.taxCode
+    }));
+  const historyPool = [...transactions, ...postedAsTransactions];
+
+  const candidateTransactions = historyPool.filter((tx) => {
     const sameVendor = vendorCandidates.length
       ? vendorCandidates.some((vendor) => vendor.id === tx.vendorId || vendor.name === tx.vendor)
       : true;
@@ -1353,7 +1422,7 @@ function generateRecommendation(invoice = {}, { vendors = [], transactions = [] 
     return sameVendor && (sameDescription || sameHsn || samePo);
   });
 
-  const fallbackTransactions = transactions.filter((tx) => {
+  const fallbackTransactions = historyPool.filter((tx) => {
     if (candidateTransactions.some((item) => item.po === tx.po)) return false;
     return (invoice.vendor ? String(tx.vendor || '').toLowerCase().includes(String(invoice.vendor).toLowerCase()) : true)
       || (invoice.hsnCode ? String(tx.hsnCode || '').includes(String(invoice.hsnCode)) : false)

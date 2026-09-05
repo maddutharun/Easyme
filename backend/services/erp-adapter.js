@@ -77,15 +77,76 @@ class MockErpAdapter extends DemoErpAdapter {
   }
 }
 
+class RestErpAdapter extends DemoErpAdapter {
+  constructor(options) {
+    super(options);
+    this.baseUrl = process.env.ERP_BASE_URL || '';
+    this.apiKey = process.env.ERP_API_KEY || '';
+  }
+
+  headers() {
+    const headers = { 'Content-Type': 'application/json' };
+    if (this.apiKey) headers.Authorization = `Bearer ${this.apiKey}`;
+    return headers;
+  }
+
+  async ping() {
+    if (!this.baseUrl) return super.ping();
+    try {
+      const response = await fetch(`${this.baseUrl.replace(/\/$/, '')}/health`, { headers: this.headers(), signal: AbortSignal.timeout(4000) });
+      return { ok: response.ok, provider: 'rest-erp', checkedAt: new Date().toISOString() };
+    } catch (error) {
+      return { ok: false, provider: 'rest-erp', error: error.message, checkedAt: new Date().toISOString() };
+    }
+  }
+
+  async postInvoice(invoice) {
+    if (!this.baseUrl) return super.postInvoice(invoice);
+    const idempotencyKey = invoice.posting?.idempotencyKey || `${invoice.vendorId || 'unknown'}:${invoice.invoiceNumber || invoice.id}`;
+    const response = await fetch(`${this.baseUrl.replace(/\/$/, '')}/invoices`, {
+      method: 'POST',
+      headers: { ...this.headers(), 'Idempotency-Key': idempotencyKey },
+      body: JSON.stringify({
+        vendorId: invoice.vendorId,
+        invoiceNumber: invoice.invoiceNumber,
+        amount: invoice.amount,
+        po: invoice.po,
+        currency: invoice.currency
+      }),
+      signal: AbortSignal.timeout(8000)
+    });
+    if (!response.ok) {
+      const error = new Error(`ERP HTTP ${response.status}`);
+      error.code = 'ERP_HTTP';
+      throw error;
+    }
+    const payload = await response.json();
+    const result = {
+      erpDocument: payload.erpDocument || payload.id,
+      postedAt: new Date().toISOString(),
+      idempotencyKey,
+      status: 'posted',
+      provider: 'rest-erp',
+      total: Number(invoice.amount || 0),
+      invoiceNumber: invoice.invoiceNumber
+    };
+    this.posted.set(idempotencyKey, result);
+    return result;
+  }
+}
+
 function createErpAdapter({ transactions, invoices, mode = process.env.ERP_MODE || 'demo' } = {}) {
+  if (process.env.ERP_BASE_URL) {
+    return new RestErpAdapter({ transactions, invoices });
+  }
   const providers = {
     demo: DemoErpAdapter,
     mock: MockErpAdapter,
-    real: DemoErpAdapter
+    real: RestErpAdapter
   };
 
   const Adapter = providers[mode] || DemoErpAdapter;
   return new Adapter({ transactions, invoices });
 }
 
-module.exports = { DemoErpAdapter, MockErpAdapter, createErpAdapter };
+module.exports = { DemoErpAdapter, MockErpAdapter, RestErpAdapter, createErpAdapter };

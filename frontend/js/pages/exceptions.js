@@ -13,13 +13,14 @@ export function renderExceptionsPage({ appView, state, renderBreadcrumbBar, form
       <div class="page-header">
         <div>
           <h1 class="page-title">Exception queue</h1>
-          <p class="page-subtitle">Invoices blocked from posting. Open a row to correct fields and decide.</p>
+          <p class="page-subtitle">Invoices blocked from posting. Open a row to correct fields and decide. Press J / K to move, Enter to open.</p>
         </div>
       </div>
       <div class="worklist">
         ${exceptions.length ? exceptions.map((invoice) => {
           const blockers = failedChecks(invoice);
-          const reason = invoice.issue || (blockers.length ? blockers.slice(0, 2).join(' · ') : 'Needs review');
+          const lineGap = invoice.lineMatch && invoice.lineMatch.passed === false ? 'Line mismatch' : null;
+          const reason = invoice.issue || lineGap || (blockers.length ? blockers.slice(0, 2).join(' · ') : 'Needs review');
           const money = invoice.currency === 'INR' ? null : formatMoney;
           const amount = money ? money(invoice.amount || 0) : `Rs ${Number(invoice.amount || 0).toLocaleString('en-IN')}`;
           return `
@@ -45,4 +46,25 @@ export function renderExceptionsPage({ appView, state, renderBreadcrumbBar, form
       window.dispatchEvent(new CustomEvent('easyme:navigate'));
     });
   });
+
+  const rows = [...appView.querySelectorAll('.worklist-row')];
+  const keyHandler = (event) => {
+    if (event.target.tagName === 'INPUT' || event.target.tagName === 'TEXTAREA') return;
+    const current = rows.findIndex((row) => row.dataset.invoiceId === state.selectedInvoiceId);
+    if (event.key === 'j' || event.key === 'ArrowDown') {
+      const next = rows[Math.min(rows.length - 1, current + 1)] || rows[0];
+      next?.focus();
+      state.selectedInvoiceId = next?.dataset.invoiceId;
+    }
+    if (event.key === 'k' || event.key === 'ArrowUp') {
+      const prev = rows[Math.max(0, current - 1)] || rows[0];
+      prev?.focus();
+      state.selectedInvoiceId = prev?.dataset.invoiceId;
+    }
+    if (event.key === 'Enter' && state.selectedInvoiceId) {
+      state.currentView = 'invoice-detail';
+      window.dispatchEvent(new CustomEvent('easyme:navigate'));
+    }
+  };
+  appView.addEventListener('keydown', keyHandler);
 }

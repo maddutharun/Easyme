@@ -15,17 +15,18 @@ class InvoiceQueue extends EventEmitter {
       createdAt: new Date().toISOString(),
       status: 'queued'
     };
-    this.jobs.push(entry);
+    this.jobs.unshift(entry);
+    if (this.jobs.length > 80) this.jobs.length = 80;
     this.emit('queued', entry);
     this.processNext();
     return entry;
   }
 
   processNext() {
-    if (this.isProcessing || this.jobs.length === 0) return;
+    if (this.isProcessing) return;
+    const nextJob = this.jobs.find((job) => job.status === 'queued');
+    if (!nextJob) return;
     this.isProcessing = true;
-    const nextJob = this.jobs.shift();
-
     nextJob.status = 'processing';
     this.emit('processing', nextJob);
 
@@ -40,6 +41,10 @@ class InvoiceQueue extends EventEmitter {
 
   list() {
     return this.jobs.slice();
+  }
+
+  backlog() {
+    return this.jobs.filter((job) => job.status === 'queued' || job.status === 'processing').length;
   }
 }
 

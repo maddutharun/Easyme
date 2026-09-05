@@ -7,7 +7,12 @@ const signatures = {
   '.jpeg': (buffer) => buffer.subarray(0, 3).equals(Buffer.from([255, 216, 255])),
   '.tif': (buffer) => buffer.subarray(0, 4).equals(Buffer.from([0x49, 0x49, 0x2a, 0x00])) || buffer.subarray(0, 4).equals(Buffer.from([0x4d, 0x4d, 0x00, 0x2a])),
   '.tiff': (buffer) => buffer.subarray(0, 4).equals(Buffer.from([0x49, 0x49, 0x2a, 0x00])) || buffer.subarray(0, 4).equals(Buffer.from([0x4d, 0x4d, 0x00, 0x2a])),
-  '.xlsx': (buffer) => buffer.subarray(0, 2).equals(Buffer.from([80, 75]))
+  '.xlsx': (buffer) => buffer.subarray(0, 2).equals(Buffer.from([80, 75])),
+  '.xls': (buffer) => buffer.subarray(0, 4).equals(Buffer.from([0xd0, 0xcf, 0x11, 0xe0])) || buffer.subarray(0, 2).equals(Buffer.from([80, 75])),
+  '.json': (buffer) => {
+    const text = String(buffer || '').replace(/^\uFEFF/, '').trimStart();
+    return text.startsWith('{') || text.startsWith('[');
+  }
 };
 
 const validateFileSignature = (file) => {

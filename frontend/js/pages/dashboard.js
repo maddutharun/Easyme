@@ -3,7 +3,10 @@ export function renderDashboardPage({ appView, state, renderBreadcrumbBar, forma
     total: state.metrics?.total ?? state.invoices.length,
     posted: state.metrics?.posted ?? 0,
     exceptions: state.metrics?.exceptions ?? 0,
-    avgConfidence: state.metrics?.averageConfidence ?? 0
+    avgConfidence: state.metrics?.averageConfidence ?? 0,
+    stpRate: Math.round(Number(state.metrics?.stpRate || 0) * 1000) / 10,
+    autoPostEligible: state.metrics?.autoPostEligible ?? 0,
+    queueBacklog: state.metrics?.queueBacklog ?? (state.queueJobs || []).filter((job) => job.status !== 'completed').length
   };
   const statusCounts = {
     posted: state.invoices.filter((invoice) => String(invoice.status || '').includes('posted')).length,
@@ -23,6 +26,9 @@ export function renderDashboardPage({ appView, state, renderBreadcrumbBar, forma
         <div class="stat-box"><div class="stat-label">Posted</div><div class="stat-value">${metrics.posted}</div></div>
         <div class="stat-box"><div class="stat-label">Exceptions</div><div class="stat-value">${metrics.exceptions}</div></div>
         <div class="stat-box"><div class="stat-label">Avg confidence</div><div class="stat-value">${metrics.avgConfidence}%</div></div>
+        <div class="stat-box"><div class="stat-label">Posted rate</div><div class="stat-value">${metrics.stpRate}%</div></div>
+        <div class="stat-box"><div class="stat-label">Auto-post eligible</div><div class="stat-value">${metrics.autoPostEligible}</div></div>
+        <div class="stat-box"><div class="stat-label">Queue backlog</div><div class="stat-value">${metrics.queueBacklog}</div></div>
       </div>
       <div class="dashboard-actions">
         <button class="action-card" type="button" data-route="upload"><div class="action-label">Upload invoice</div></button>
