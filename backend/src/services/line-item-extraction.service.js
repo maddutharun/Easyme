@@ -27,14 +27,18 @@ const parseLineItem = (line, continuation = '') => {
   const fullText = `${text} ${continuation}`.replace(/\s+/g, ' ').trim();
   const skuMatch = fullText.match(/(?:sku\s*id|sku|item\s*(?:code|no)|product\s*code|material\s*code|part\s*no|model\s*no)\s*[:#-]?\s*([A-Z0-9][A-Z0-9_.-]{2,})/i);
   const isNumberedRow = /^\d+[.)]?\s+/.test(text);
-  if (!isNumberedRow && !skuMatch) return null;
   const hsnMatch = fullText.match(/\b(\d{4,8})\b(?!\s*%)/);
+  if ((!isNumberedRow && !skuMatch) || (!hsnMatch && !skuMatch)) return null;
   const hsn = hsnMatch?.[1] || null;
   const numericSource = hsnMatch ? fullText.slice(hsnMatch.index + hsnMatch[0].length) : fullText;
   const numbers = [...numericSource.matchAll(/(?:₹|rs\.?|inr|usd|\$)?\s*([\d,]+(?:\.\d{1,2})?)/gi)]
+    .filter((match) => !/\s*%/.test(numericSource.slice(match.index + match[0].length)))
     .map((match) => parseMoney(match[1]))
     .filter((value) => Number.isFinite(value));
-  const assigned = assignQtyRateAmount(numbers, hsn);
+  const columnMatch = fullText.match(/\b(\d+(?:\.\d+)?)\s*(?:pcs?|nos|units?|boxes?|kg|ltrs?|mtrs?)\s+([\d,]+(?:\.\d{1,2})?)\s+([\d,]+(?:\.\d{1,2})?)\b/i);
+  const assigned = columnMatch
+    ? { quantity: parseMoney(columnMatch[1]), unitPrice: parseMoney(columnMatch[2]), amount: parseMoney(columnMatch[3]) }
+    : assignQtyRateAmount(numbers, hsn);
   if (!assigned) return null;
   const hsnIndex = hsnMatch ? text.indexOf(hsnMatch[1]) : -1;
   const description = (hsnIndex > 0 ? text.slice(text.search(/\s/) + 1, hsnIndex) : text.replace(/^\d+[.)]?\s+/, ''))
@@ -59,11 +63,8 @@ const parseLineItem = (line, continuation = '') => {
 
 function assignQtyRateAmount(numbers, hsn) {
   const values = numbers.filter((value) => value > 0);
-  if (hsn && values.length >= 3) {
-    return { quantity: values[0], unitPrice: values[1], amount: values[2] };
-  }
   if (values.length >= 3) {
-    for (let index = 0; index <= values.length - 3; index += 1) {
+    for (let index = values.length - 3; index >= 0; index -= 1) {
       const quantity = values[index];
       const unitPrice = values[index + 1];
       const amount = values[index + 2];
@@ -72,7 +73,6 @@ function assignQtyRateAmount(numbers, hsn) {
         return { quantity, unitPrice, amount };
       }
     }
-    return null;
   }
   return null;
 }

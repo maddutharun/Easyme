@@ -32,6 +32,25 @@ test('extractLineItems keeps HSN rows and ignores the tax footer', () => {
   assert.equal(items.length, 1);
   assert.equal(items[0].sku, 'CPS30909');
   assert.equal(items[0].quantity, 400);
+  assert.equal(items[0].unitPrice, 258);
+  assert.equal(items[0].amount, 108360);
+});
+
+test('extractLineItems ignores GST rate and uses quantity, rate, and line amount', () => {
+  const items = extractLineItems(`
+    1 Imported Bottle HSN 95069190 GST 18% 70 Pcs 600.00 42000.00
+    Taxable Amount: 42000.00
+    Grand Total: 49560.00
+  `);
+  assert.equal(items.length, 1);
+  assert.equal(items[0].quantity, 70);
+  assert.equal(items[0].unitPrice, 600);
+  assert.equal(items[0].amount, 42000);
+});
+
+test('extractLineItems rejects numbered non-invoice text without HSN or SKU', () => {
+  const items = extractLineItems('1 Confidence Engine returns a confidence score of 95.0');
+  assert.equal(items.length, 0);
 });
 
 test('extractLineItems joins a wrapped HSN onto the numbered row', async () => {

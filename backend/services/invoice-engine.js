@@ -1124,6 +1124,8 @@ async function extractInvoiceData(file) {
   if (!taxBreakdown.cgst && !taxBreakdown.sgst && !taxBreakdown.igst && taxSummary.igstAmount) taxBreakdown.igst = taxSummary.igstAmount;
   taxBreakdown.rates = taxSummary.rates;
   const lineItemsWithTax = extractedLineItems.map((line) => ({ ...line, gstRate: line.gstRate ?? taxBreakdown.gstRate }));
+  const lineQuantityTotal = lineItemsWithTax.reduce((sum, line) => sum + Number(line.quantity || 0), 0);
+  const resolvedQuantity = Number(quantityFromText) || lineQuantityTotal;
   const discountAmount = charges.filter((charge) => charge.type === 'discount').reduce((sum, charge) => sum + charge.amount, 0);
   const otherCharges = charges.filter((charge) => charge.type !== 'discount');
   const layoutGrandTotal = layout.pages.flatMap((page) => page.rows || []).map((row) => row.items.map((item) => item.text).join(' ')).find((line) => /\bgrand\s+total\b/i.test(line));
@@ -1173,7 +1175,7 @@ async function extractInvoiceData(file) {
       date,
       po,
       hsnCode: hsnMatch || null,
-      quantity: quantityFromText,
+      quantity: resolvedQuantity,
       currency
     },
     totals: {
@@ -1204,7 +1206,7 @@ async function extractInvoiceData(file) {
     mode: '3-way',
     lineItems: lineItemsWithTax,
     lineItemCount: lineItemsWithTax.length,
-    quantity: quantityFromText,
+    quantity: resolvedQuantity,
     totalValid: null,
     historicalMatch: null,
     tax: parsedTaxAmount,
