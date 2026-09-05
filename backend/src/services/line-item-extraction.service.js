@@ -1,4 +1,5 @@
 const { STOP_LINE } = require('./extraction-refine.service');
+const FOOTER_HEADING_LINE = /^(taxable\s+amount|cgst|sgst|igst|grand\s+total|total\s+amount|output\s+gst|freight)/i;
 
 const parseMoney = (value) => {
   const raw = String(value ?? '').trim();
@@ -16,8 +17,15 @@ const parseMoney = (value) => {
     const merged = [];
     for (const line of sourceLines) {
       const isNewRow = /^\d+[.)]?\s+/.test(line) || /\b(?:sku|item\s*(?:code|no)|product\s*code)\b/i.test(line);
-      if (!isNewRow && merged.length && !HEADER_PATTERN.test(line)) merged[merged.length - 1] += ` ${line}`;
-      else merged.push(line);
+      if (STOP_LINE.test(line) || FOOTER_HEADING_LINE.test(line)) {
+        merged.push(line);
+        continue;
+      }
+      if (!isNewRow && merged.length && !HEADER_PATTERN.test(line) && !STOP_LINE.test(merged[merged.length - 1])) {
+        merged[merged.length - 1] += ` ${line}`;
+      } else {
+        merged.push(line);
+      }
     }
     return merged;
   };
@@ -58,21 +66,22 @@ const parseLineItem = (line, continuation = '') => {
 };
 
 function assignQtyRateAmount(numbers, hsn) {
-  const values = numbers.filter((value) => value > 0);
-  if (hsn && values.length >= 3) {
-    return { quantity: values[0], unitPrice: values[1], amount: values[2] };
-  }
-  if (values.length >= 3) {
-    for (let index = 0; index <= values.length - 3; index += 1) {
-      const quantity = values[index];
-      const unitPrice = values[index + 1];
-      const amount = values[index + 2];
-      const expected = quantity * unitPrice;
-      if (Math.abs(expected - amount) <= Math.max(1, amount * 0.02)) {
-        return { quantity, unitPrice, amount };
-      }
+  const values = numbers.filter((value) => value > 0 && value !== Number(hsn));
+  const tryTriple = (quantity, unitPrice, amount) => {
+    const expected = quantity * unitPrice;
+    if (Math.abs(expected - amount) <= Math.max(1, amount * 0.02)) {
+      return { quantity, unitPrice, amount };
     }
     return null;
+  };
+  if (values.length >= 3) {
+    for (let index = 0; index <= values.length - 3; index += 1) {
+      const hit = tryTriple(values[index], values[index + 1], values[index + 2]);
+      if (hit) return hit;
+    }
+  }
+  if (hsn && values.length >= 3) {
+    return { quantity: values[0], unitPrice: values[1], amount: values[2] };
   }
   return null;
 }

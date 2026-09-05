@@ -16,8 +16,8 @@ function collectExceptionReasons({ extracted = {}, comparison = {}, duplicate = 
   if (lineMatch && lineMatch.passed === false) {
     reasons.push('Invoice lines do not match PO quantity or amount within tolerance.');
   }
-  if (autoPost && autoPost.eligible === false && autoPost.blockers?.includes('HIGH_VALUE')) {
-    reasons.push('Amount is above the high-value review threshold.');
+  if (extracted.regionLocks && extracted.regionLocks.passed === false) {
+    reasons.push('Seller, ship-to, or totals may be assigned from the wrong invoice region.');
   }
   const failed = (comparison.checks || []).filter((check) => !check.passed);
   for (const check of failed.slice(0, 4)) {

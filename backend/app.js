@@ -527,7 +527,7 @@ app.post('/api/invoices/:id/review', requireAuth, requireRole('ap_clerk', 'ap_ma
   const allowedFields = [
     'vendor', 'supplierName', 'supplierGstin', 'supplierPan', 'supplierAddress', 'supplierState',
     'invoiceNumber', 'date', 'dueDate', 'currency', 'po', 'amount', 'tax', 'baseAmount',
-    'taxAmount', 'totalAmount', 'hsnCode', 'description', 'shipToDetails', 'sealPresent',
+    'taxAmount', 'totalAmount', 'hsnCode', 'description', 'shipToDetails', 'placeOfSupply', 'quantity', 'sealPresent',
     'signaturePresent', 'businessDetails', 'reason'
   ];
   const corrections = {};
@@ -901,7 +901,7 @@ app.patch('/api/invoices/:id', requireAuth, requireRole('ap_clerk', 'ap_manager'
   const allowedFields = [
     'vendor', 'supplierName', 'supplierGstin', 'supplierPan', 'supplierAddress', 'supplierState',
     'invoiceNumber', 'date', 'dueDate', 'currency', 'po', 'amount', 'tax', 'baseAmount',
-    'taxAmount', 'totalAmount', 'hsnCode', 'description', 'shipToDetails', 'sealPresent',
+    'taxAmount', 'totalAmount', 'hsnCode', 'description', 'shipToDetails', 'placeOfSupply', 'quantity', 'sealPresent',
     'signaturePresent', 'businessDetails', 'status'
   ];
 
