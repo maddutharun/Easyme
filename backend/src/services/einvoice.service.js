@@ -36,6 +36,7 @@ function parseEinvoicePayload(raw) {
       amount: Number(item.TotAmt || item.amount || 0)
     })),
     buyerGstin: buyer.Gstin || buyer.gstin || null,
+    shipToDetails: [data.shipTo?.LglNm || data.ShipDtls?.LglNm, data.shipTo?.Addr1 || data.ShipDtls?.Addr1].filter(Boolean).join(', ') || null,
     readable: true
   };
 }
@@ -55,6 +56,17 @@ function einvoiceToExtracted(parsed) {
     hsnCode: parsed.hsnCode,
     lineItems: parsed.lineItems || [],
     lineItemCount: (parsed.lineItems || []).length,
+    quantity: (parsed.lineItems || []).reduce((sum, line) => sum + Number(line.quantity || 0), 0),
+    totalQuantity: (parsed.lineItems || []).reduce((sum, line) => sum + Number(line.quantity || 0), 0),
+    taxableAmount: Number(parsed.amount || 0) - Number(parsed.tax || 0),
+    shipToDetails: parsed.shipToDetails,
+    buyerGstin: parsed.buyerGstin,
+    businessUnit: {
+      name: null,
+      companyCode: parsed.buyerGstin ? `IN${String(parsed.buyerGstin).slice(0, 2)}` : null,
+      plant: parsed.shipToDetails || null,
+      source: parsed.buyerGstin ? 'buyer_gstin' : 'e_invoice'
+    },
     irn: parsed.irn,
     readable: true,
     extractionIssue: null,

@@ -48,8 +48,9 @@ export function renderInvoiceDetailPage({ appView, invoice, state, renderBreadcr
   const why = invoice.issue || invoice.aiSummary || (failed[0]?.detail) || 'Ready for reviewer judgement.';
 
   const reviewFieldsByGroup = {
-    Supplier: [['vendor', 'Vendor'], ['supplierGstin', 'GSTIN'], ['supplierPan', 'PAN']],
-    Invoice: [['invoiceNumber', 'Invoice #'], ['date', 'Date'], ['po', 'PO'], ['hsnCode', 'HSN']],
+    Supplier: [['vendor', 'Vendor'], ['supplierGstin', 'GSTIN'], ['supplierPan', 'PAN'], ['supplierAddress', 'Address']],
+    Destination: [['shipToDetails', 'Ship to'], ['placeOfSupply', 'Place of supply']],
+    Invoice: [['invoiceNumber', 'Invoice #'], ['date', 'Date'], ['po', 'PO'], ['hsnCode', 'HSN'], ['quantity', 'Total qty']],
     Amounts: [['amount', 'Total'], ['tax', 'Tax'], ['baseAmount', 'Taxable']]
   };
 
@@ -57,7 +58,7 @@ export function renderInvoiceDetailPage({ appView, invoice, state, renderBreadcr
     <div class="review-field-group">
       <h4 class="review-group-title">${groupTitle}</h4>
       ${fields.map(([key, label]) => {
-        const isNumeric = ['amount', 'tax', 'baseAmount'].includes(key);
+        const isNumeric = ['amount', 'tax', 'baseAmount', 'quantity'].includes(key);
         return `<div class="review-field-row"><span>${label}</span><input data-edit-field="${key}" value="${escapeHtml(invoice[key] ?? '')}" ${isNumeric ? 'inputmode="decimal"' : ''} /></div>`;
       }).join('')}
     </div>
@@ -82,7 +83,7 @@ export function renderInvoiceDetailPage({ appView, invoice, state, renderBreadcr
         <div>
           <strong>${escapeHtml(invoice.vendor || 'Unknown vendor')}</strong>
           <p style="margin:6px 0 0; color: var(--heading);">${escapeHtml(why)}</p>
-          <div class="confidence-meter" title="Match confidence ${confidence}%"><span style="width:${Math.max(0, Math.min(100, confidence))}%"></span></div>
+          ${invoice.businessUnit ? `<p style="margin:8px 0; color:var(--muted); font-size:0.85rem;">Business unit: ${escapeHtml(invoice.businessUnit.name || invoice.businessUnit.companyCode || 'Unresolved')} · ${escapeHtml(invoice.businessUnit.source || '')}${invoice.businessUnit.placeOfSupply ? ` · Place of supply ${escapeHtml(invoice.businessUnit.placeOfSupply)}` : ''}</p>` : ''}
         </div>
         <div style="text-align:right;">
           <div style="font-size:1.2rem; font-weight:700;">${currencyFormatter(invoice.amount || 0)}</div>
@@ -118,6 +119,8 @@ export function renderInvoiceDetailPage({ appView, invoice, state, renderBreadcr
             ${checks.length ? checks.map((check) => `<div class="check-row"><div><strong>${escapeHtml(check.name)}</strong><div style="color:var(--muted);font-size:0.82rem;">${escapeHtml(check.detail || '')}</div></div><span class="badge ${check.passed ? 'badge-success' : 'badge-danger'}">${check.passed ? 'Pass' : 'Fail'}</span></div>`).join('') : '<div class="empty-state-text">Checks appear after matching.</div>'}
           </div>
           ${invoice.lineMatch ? `<h4 style="margin: 20px 0 8px;">Line match (${escapeHtml(invoice.lineMatch.mode || '3-way')})</h4><div class="check-list">${(invoice.lineMatch.lines || []).length ? invoice.lineMatch.lines.map((line) => `<div class="check-row"><div><strong>${escapeHtml(line.sku || line.hsnCode || 'Line')}</strong><div style="color:var(--muted);font-size:0.82rem;">${escapeHtml(line.reason || '')}</div></div><span class="badge ${line.matched ? 'badge-success' : 'badge-danger'}">${line.matched ? 'Match' : 'Gap'}</span></div>`).join('') : `<div class="empty-state-text">${invoice.lineMatch.passed == null ? 'No invoice lines to match; header 2-way/3-way still applies.' : 'No line rows.'}</div>`}</div>` : ''}
+          ${Array.isArray(invoice.lineItems) && invoice.lineItems.length ? `<h4 style="margin: 20px 0 8px;">Invoice lines</h4><div class="check-list">${invoice.lineItems.slice(0, 12).map((line) => `<div class="check-row"><div><strong>${escapeHtml(line.description || line.sku || line.hsnCode || 'Item')}</strong><div style="color:var(--muted);font-size:0.82rem;">HSN ${escapeHtml(line.hsnCode || '—')} · Qty ${escapeHtml(line.quantity ?? '—')} · Amount ${currencyFormatter(line.amount || 0)}</div></div></div>`).join('')}</div>` : ''}
+          ${invoice.regionLocks ? `<p style="margin-top:12px; color: var(--muted); font-size:0.85rem;">Field locks: ${invoice.regionLocks.passed ? 'seller, ship-to, qty, and tax vs total are consistent' : 'a region mix-up was flagged for review'}.</p>` : ''}
           ${invoice.autoPost ? `<p style="margin-top:12px; color: var(--muted); font-size:0.85rem;">Auto-post: ${escapeHtml(invoice.autoPost.summary || (invoice.autoPost.eligible ? 'eligible' : 'blocked'))}. Execute stays off unless AUTO_POST_EXECUTE is set.</p>` : ''}
           <h4 style="margin: 20px 0 8px;">Vendor query</h4>
           <div class="check-list" style="margin-bottom:8px;">

@@ -6,6 +6,7 @@ const { HttpDocumentAiProvider } = require('../src/ai/http.provider');
 const { findVendorTemplate } = require('../src/services/vendor-template.service');
 const { parseEinvoicePayload, einvoiceToExtracted } = require('../src/services/einvoice.service');
 const { repairOcrText, preferStructuredText, extractGstin, extractIrn, pickVendorName } = require('../src/services/extraction-refine.service');
+const { extractPartyBlocks, extractFooterTotals, resolveBusinessUnit, applyRegionLocks, sumLineQuantities, sumLineAmounts } = require('../src/services/region-extraction.service');
 
 async function extractPdfText(buffer) {
   if (!buffer || buffer.length === 0) return '';
@@ -664,7 +665,7 @@ function extractSupplierState(text) {
 
 function extractShipToDetails(text) {
   const lines = String(text || '').split(/\n|;/).map((line) => line.trim()).filter(Boolean);
-  const index = lines.findIndex((line) => /(?:ship(?:ped)? to|bill to|consignee)/i.test(line));
+  const index = lines.findIndex((line) => /(?:ship(?:ped)? to|consignee|delivered to)\b/i.test(line) && !/bill to/i.test(line));
   if (index === -1) return null;
 
   const collected = [];
@@ -748,8 +749,8 @@ function parseInvoiceFieldValues(normalizedText) {
   for (const line of lines) {
     const lower = line.toLowerCase();
 
-    if (!values.vendor && /(seller|supplier|vendor|bill from|bill to|sold by)/i.test(line)) {
-      const match = line.match(/(?:seller|supplier|vendor|bill from|bill to|sold by)\s*[:\-]?\s*([A-Za-z0-9&.,()\/ -]{3,80})/i);
+    if (!values.vendor && /(seller|supplier|vendor|bill from|sold by)\b/i.test(line) && !/bill to|ship to/i.test(line)) {
+      const match = line.match(/(?:seller|supplier|vendor|bill from|sold by)\s*[:\-]?\s*([A-Za-z0-9&.,()\/ -]{3,80})/i);
       if (match) values.vendor = match[1].trim();
     }
 
@@ -917,8 +918,11 @@ function buildValidationChecks(extracted) {
 function deriveVendorMetadata(extracted = {}) {
   const description = [extracted.description, extracted.vendor, extracted.supplierName, extracted.shipToDetails].filter(Boolean).join(' ');
   const hsn = String(extracted.hsnCode || '').trim();
-  const stateText = String(extracted.supplierState || extracted.state || '').trim();
-  const stateCodeMatch = stateText.match(/\((\d+)\)/);
+  const supplierGstin = String(extracted.supplierGstin || extracted.gstin || '');
+  const vendorStateCode = supplierGstin.slice(0, 2) || extracted.businessUnit?.placeOfSupplyCode || undefined;
+  const buyerStateCode = extracted.businessUnit?.placeOfSupplyCode
+    || String(extracted.buyerGstin || '').slice(0, 2)
+    || undefined;
 
   let vendorCategory = 'default';
   if (/^99\d{2,6}$/.test(hsn) || /consult|service|professional|technical|software|advisory|it service/i.test(description)) {
@@ -935,8 +939,8 @@ function deriveVendorMetadata(extracted = {}) {
 
   return {
     vendorCategory,
-    vendorStateCode: stateCodeMatch ? stateCodeMatch[1] : undefined,
-    buyerStateCode: stateCodeMatch ? stateCodeMatch[1] : undefined,
+    vendorStateCode: vendorStateCode || undefined,
+    buyerStateCode: buyerStateCode || vendorStateCode || undefined,
     panAvailable: Boolean(extracted.supplierPan || extracted.pan),
     vendorPanAvailable: Boolean(extracted.supplierPan || extracted.pan),
     serviceType: /^99\d{2,6}$/.test(hsn) ? 'professional' : undefined,
@@ -1026,15 +1030,6 @@ async function extractInvoiceData(file) {
   }
 
   const fieldValues = parseInvoiceFieldValues(normalizedText);
-  const shipToDetails = fieldValues.shipToDetails || extractShipToDetails(normalizedText) || null;
-  const hsnMatch = fieldValues.hsnCode || normalizedText.match(/(?:hsn\s*(?:code)?|sac)\s*[:=]?\s*([0-9]{4,8})/i)?.[1] || null;
-  const quantityFromText = fieldValues.quantity || extractQuantity(normalizedText);
-  const baseAmount = fieldValues.baseAmount || extractAmountForLabel(normalizedText, ['base amount']);
-  const taxAmount = fieldValues.taxAmount || extractAmountForLabel(normalizedText, ['tax amount', 'output gst']);
-  const totalAmount = fieldValues.totalAmount || extractAmountForLabel(normalizedText, ['total amount', 'grand total', 'amount due', 'net total']);
-  const signaturePresent = /authorized signatory|authorised signatory|signature/i.test(normalizedText);
-  const sealPresent = /seal(?:\s+of\s+company)?|stamp/i.test(normalizedText);
-
   const vendorMap = {
     'northstar': 'Northstar Office Co.',
     'lumen': 'Lumen Freight Services',
@@ -1042,19 +1037,29 @@ async function extractInvoiceData(file) {
     'briar': 'Briar & Finch Facilities',
     'cultsport': 'Cultsport Private Limited'
   };
+  const parties = extractPartyBlocks(normalizedText, fieldValues, vendorMap);
+  const footerTotals = extractFooterTotals(parties.regions.footer, normalizedText);
+  const shipToDetails = parties.shipToDetails || fieldValues.shipToDetails || extractShipToDetails(normalizedText) || null;
+  const hsnMatch = fieldValues.hsnCode || normalizedText.match(/(?:hsn\s*(?:code)?|sac)\s*[:=]?\s*([0-9]{4,8})/i)?.[1] || null;
+  const quantityFromText = fieldValues.quantity || extractQuantity(normalizedText);
+  const baseAmount = footerTotals.taxable || fieldValues.baseAmount || extractAmountForLabel(normalizedText, ['base amount']);
+  const taxAmount = footerTotals.tax || fieldValues.taxAmount || extractAmountForLabel(normalizedText, ['tax amount', 'output gst']);
+  const totalAmount = footerTotals.grand || fieldValues.totalAmount || extractAmountForLabel(normalizedText, ['total amount', 'grand total', 'amount due', 'net total']);
+  const signaturePresent = /authorized signatory|authorised signatory|signature/i.test(normalizedText);
+  const sealPresent = /seal(?:\s+of\s+company)?|stamp/i.test(normalizedText);
 
-  const gstinInfo = extractGstin(normalizedText);
+  const gstinInfo = extractGstin(parties.regions.seller || normalizedText);
   const irn = extractIrn(normalizedText);
-  const supplierName = fieldValues.supplierName || normalizedText.match(/(?:m\/s|ms|company|seller|supplier|vendor)\s*[:\-]?\s*([A-Z0-9&/ .()-]{3,120})/i)?.[1]?.trim() || null;
+  const supplierName = parties.supplierName || fieldValues.supplierName || normalizedText.match(/(?:m\/s|ms|company|seller|supplier|vendor)\s*[:\-]?\s*([A-Z0-9&/ .()-]{3,120})/i)?.[1]?.trim() || null;
   const vendor = sanitizeVendorName(
-    pickVendorName(normalizedText, { ...fieldValues, supplierName }, vendorMap)
+    pickVendorName(parties.regions.seller || normalizedText, { ...fieldValues, supplierName }, vendorMap)
     || fieldValues.vendor
     || Object.entries(vendorMap).find(([key]) => lowerText.includes(key))?.[1]
     || normalizedText.match(/(?:seller|vendor|sold by|supplier)\s*[:\-]?\s*([A-Za-z&. ()-]{3,80})(?=\s*(?:gstin|gstin\/uin|state name|invoice|date|po|amount|tax|hsn|sac|vendor|$))/i)?.[1]?.trim()
     || normalizedText.match(/([A-Z][A-Za-z0-9&.() -]{3,80})\s*(?:gstin|gstin\/uin|state name)/i)?.[1]?.trim()
     || supplierName
     || normalizedText.split(/\n|;/).map((line) => line.trim()).find((line) => {
-      if (!line || line.length < 4 || /^(invoice|tax invoice|invoice no|invoice number|gstin|state name|hsn|sac|date|due date|amount|total|output gst|gst|po|purchase order|item|description|qty|quantity)/i.test(line)) return false;
+      if (!line || line.length < 4 || /^(invoice|tax invoice|invoice no|invoice number|gstin|state name|hsn|sac|date|due date|amount|total|output gst|gst|po|purchase order|item|description|qty|quantity|bill to|ship to)/i.test(line)) return false;
       if (/\d/.test(line)) return false;
       return /[A-Za-z]/.test(line);
     })
@@ -1113,13 +1118,13 @@ async function extractInvoiceData(file) {
     return extractLineItemsFromLayout(layout);
   })();
   const charges = extractCharges(normalizedText);
-  const taxSummary = extractTaxSummary(normalizedText);
-  const computedTaxableAmount = extractedLineItems.reduce((sum, line) => sum + Number(line.taxableAmount || 0), 0);
-  const statedTaxableAmount = extractAmountForLabel(normalizedText, ['taxable amount', 'base amount', 'subtotal']);
-  const taxableAmount = Number(taxSummary.taxableAmount) || Number(statedTaxableAmount) || Number(baseAmount) || computedTaxableAmount || Math.max(0, Number(totalAmount || numericAmount) - Number(taxAmount || taxMatch || 0));
-  const explicitTaxAmount = extractAmountForLabel(normalizedText, ['tax amount', 'gst total', 'total gst']);
-  const componentTaxAmount = ['cgst', 'sgst', 'igst', 'utgst'].reduce((sum, label) => sum + (Number(normalizedText.match(new RegExp(`\\b${label}\\b(?:\\s+\\d+(?:\\.\\d+)?\\s*%)?\\s*[:=]\\s*[₹$]?\\s*([\\d,]+(?:\\.\\d{1,2})?)`, 'i'))?.[1]?.replaceAll(',', '')) || 0), 0);
-  const parsedTaxAmount = Number(taxSummary.taxAmount) || Number(explicitTaxAmount) || componentTaxAmount || Number(String(taxAmount || taxMatch || 0).replace(/[$,₹]/g, '')) || 0;
+  const taxSummary = extractTaxSummary(parties.regions.footer || '');
+  const computedTaxableAmount = sumLineAmounts(extractedLineItems);
+  const statedTaxableAmount = footerTotals.taxable || extractAmountForLabel(normalizedText, ['taxable amount', 'base amount', 'subtotal']);
+  const taxableAmount = Number(statedTaxableAmount) || Number(baseAmount) || Number(taxSummary.taxableAmount) || computedTaxableAmount || Math.max(0, Number(totalAmount || numericAmount) - Number(taxAmount || taxMatch || 0));
+  const explicitTaxAmount = footerTotals.tax || extractAmountForLabel(normalizedText, ['tax amount', 'gst total', 'total gst']);
+  const componentTaxAmount = footerTotals.cgst + footerTotals.sgst + footerTotals.igst || ['cgst', 'sgst', 'igst', 'utgst'].reduce((sum, label) => sum + (Number(normalizedText.match(new RegExp(`\\b${label}\\b(?:\\s+\\d+(?:\\.\\d+)?\\s*%)?\\s*[:=]\\s*[₹$]?\\s*([\\d,]+(?:\\.\\d{1,2})?)`, 'i'))?.[1]?.replaceAll(',', '')) || 0), 0);
+  const parsedTaxAmount = Number(explicitTaxAmount) || componentTaxAmount || Number(taxSummary.taxAmount) || Number(String(taxAmount || taxMatch || 0).replace(/[$,₹]/g, '')) || 0;
   const taxBreakdown = extractTaxBreakdown(normalizedText, taxableAmount, parsedTaxAmount);
   if (!taxBreakdown.cgst && !taxBreakdown.sgst && !taxBreakdown.igst && taxSummary.igstAmount) taxBreakdown.igst = taxSummary.igstAmount;
   taxBreakdown.rates = taxSummary.rates;
@@ -1136,7 +1141,17 @@ async function extractInvoiceData(file) {
     || (grandTotalLine ? [...grandTotalLine.matchAll(/([\d,]+(?:\.\d{1,2})?)/g)].at(-1)?.[1]
     || extractAmountForLabel(normalizedText, ['net payable', 'amount payable'])
     : extractAmountForLabel(normalizedText, ['net payable', 'amount payable']));
-  const finalTotal = normalizeNumber(explicitGrandTotal) || normalizeNumber(totalAmount) || normalizeNumber(numericAmount) || taxableAmount + parsedTaxAmount;
+  const finalTotal = normalizeNumber(footerTotals.grand) || normalizeNumber(explicitGrandTotal) || normalizeNumber(totalAmount) || normalizeNumber(numericAmount) || taxableAmount + parsedTaxAmount;
+  const lineQuantityTotal = sumLineQuantities(extractedLineItems);
+  const totalQuantity = lineQuantityTotal > 0 ? lineQuantityTotal : quantityFromText;
+  const businessUnit = resolveBusinessUnit({
+    buyerGstin: parties.buyerGstin,
+    buyerName: parties.buyerName,
+    shipToDetails,
+    placeOfSupply: parties.placeOfSupply,
+    placeOfSupplyCode: parties.placeOfSupplyCode,
+    po
+  });
   const arithmetic = validateArithmetic({
     lineItems: lineItemsWithTax,
     taxableAmount,
@@ -1145,6 +1160,16 @@ async function extractInvoiceData(file) {
     discount: discountAmount,
     totalAmount: finalTotal,
     tolerance: 1
+  });
+  const regionLocks = applyRegionLocks({
+    supplierGstin: parties.supplierGstin || gstinInfo.value,
+    buyerGstin: parties.buyerGstin,
+    shipToDetails,
+    lineItems: lineItemsWithTax,
+    taxableAmount,
+    taxAmount: parsedTaxAmount,
+    totalAmount: finalTotal,
+    totalQuantity
   });
 
   const hasUsdMarker = /\$|\busd\b|dollars?/i.test(normalizedText);
@@ -1155,25 +1180,30 @@ async function extractInvoiceData(file) {
     extractionWarnings.push('Numeric value may be OCR-corrupted: a leading digit is missing from one or more amount fields.');
   }
 
+  const resolvedGstin = parties.supplierGstin || gstinInfo.value || fieldValues.supplierGstin || normalizedText.match(/gstin\s*[:=]?\s*([A-Z0-9]{10,20})/i)?.[1]?.trim().toUpperCase() || null;
+  const resolvedAddress = parties.supplierAddress || fieldValues.supplierAddress || normalizedText.match(/(?:m\/s|ms|seller|supplier|vendor|company)\s*[:\-]?\s*([A-Z0-9&/ .()-]{3,120})\s*\n\s*([A-Za-z0-9, .()-]{6,120})/i)?.slice(1).join(', ') || null;
+
   const businessDetails = {
     supplier: {
       name: supplierName || vendor || null,
-      gstin: fieldValues.supplierGstin || gstinInfo.value || normalizedText.match(/gstin\s*[:=]?\s*([A-Z0-9]{10,20})/i)?.[1]?.trim().toUpperCase() || null,
+      gstin: resolvedGstin,
       pan: fieldValues.supplierPan || normalizedText.match(/pan\s*[:=]?\s*([A-Z0-9]{10})/i)?.[1]?.trim().toUpperCase() || null,
-      address: fieldValues.supplierAddress || normalizedText.match(/(?:m\/s|ms|seller|supplier|vendor|company)\s*[:\-]?\s*([A-Z0-9&/ .()-]{3,120})\s*\n\s*([A-Za-z0-9, .()-]{6,120})/i)?.slice(1).join(', ') || null,
+      address: resolvedAddress,
       state: fieldValues.supplierState || extractSupplierState(normalizedText) || null
     },
     buyer: {
-      name: shipToDetails ? shipToDetails.split(',')[0].trim() : null,
-      address: shipToDetails || null,
-      state: String(normalizedText || '').match(/(^|\n)place\s*of\s*supply\s*[:=]?\s*([A-Za-z\s]+?)(?:\s*\(\d+\)|\s*$)/i)?.[2]?.trim() || null
+      name: parties.buyerName || (shipToDetails ? shipToDetails.split(',')[0].trim() : null),
+      gstin: parties.buyerGstin,
+      address: shipToDetails || parties.regions.buyer || null,
+      state: parties.placeOfSupply || String(normalizedText || '').match(/(^|\n)place\s*of\s*supply\s*[:=]?\s*([A-Za-z\s]+?)(?:\s*\(\d+\)|\s*$)/i)?.[2]?.trim() || null
     },
+    businessUnit,
     invoice: {
       number: invoiceNumber,
       date,
       po,
       hsnCode: hsnMatch || null,
-      quantity: quantityFromText,
+      quantity: totalQuantity,
       currency
     },
     totals: {
@@ -1191,9 +1221,9 @@ async function extractInvoiceData(file) {
   const extracted = {
     vendor,
     supplierName: supplierName || vendor || null,
-    supplierGstin: gstinInfo.value || fieldValues.supplierGstin || normalizedText.match(/gstin\s*[:=]?\s*([A-Z0-9]{10,20})/i)?.[1]?.trim().toUpperCase() || null,
+    supplierGstin: resolvedGstin,
     supplierPan: fieldValues.supplierPan || normalizedText.match(/pan\s*[:=]?\s*([A-Z0-9]{10})/i)?.[1]?.trim().toUpperCase() || null,
-    supplierAddress: fieldValues.supplierAddress || normalizedText.match(/(?:m\/s|ms|seller|supplier|vendor|company)\s*[:\-]?\s*([A-Z0-9&/ .()-]{3,120})\s*\n\s*([A-Za-z0-9, .()-]{6,120})/i)?.slice(1).join(', ') || null,
+    supplierAddress: resolvedAddress,
     supplierState: fieldValues.supplierState || extractSupplierState(normalizedText) || null,
     invoiceNumber,
     date,
@@ -1204,7 +1234,8 @@ async function extractInvoiceData(file) {
     mode: '3-way',
     lineItems: lineItemsWithTax,
     lineItemCount: lineItemsWithTax.length,
-    quantity: quantityFromText,
+    quantity: totalQuantity,
+    totalQuantity,
     totalValid: null,
     historicalMatch: null,
     tax: parsedTaxAmount,
@@ -1229,6 +1260,17 @@ async function extractInvoiceData(file) {
     totalOtherCharges: otherCharges.reduce((sum, charge) => sum + charge.amount, 0),
     discountAmount,
     arithmeticValidation: arithmetic,
+    regionLocks,
+    businessUnit,
+    buyerGstin: parties.buyerGstin,
+    buyerName: parties.buyerName,
+    placeOfSupply: parties.placeOfSupply,
+    extractionRegions: {
+      seller: Boolean(parties.regions.seller),
+      shipTo: Boolean(parties.regions.shipTo),
+      table: Boolean(parties.regions.table),
+      footer: Boolean(parties.regions.footer)
+    },
     amountBreakdown: {
       taxableAmount,
       taxAmount: parsedTaxAmount,
